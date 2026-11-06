@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   recognizeValidationPrefix,
   validateStructuralRules,
-  MAX_VERIFY_GAS,
+  MAX_VERIFY_GAS_PER_ENTITY,
+  MAX_VERIFY_GAS_STAKED_ENTITY,
   MAX_VERIFY_STATE_GAS,
 } from "../../../../src/services/UserOpValidation/utils/validationPrefix.js";
 import { FRAME_MODE, APPROVE_SCOPE, ATOMIC_BATCH_FLAG, Frame, FrameTransaction, SIG_SCHEME, SignatureEntry } from "@skandha/types/lib/contracts/FrameTx.js";
@@ -224,10 +225,10 @@ describe("validateStructuralRules", () => {
     }
   });
 
-  it("rejects when the sum of limits.execution across the prefix exceeds MAX_VERIFY_GAS (item 6)", () => {
+  it("rejects when one entity's prefix execution gas exceeds MAX_VERIFY_GAS_STAKED_ENTITY (BUDGET-010)", () => {
     const bigFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_STAKED_ENTITY + 1n, state: 0n },
     };
     const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
     const frames = [bigFrame, payFrame];
@@ -237,19 +238,18 @@ describe("validateStructuralRules", () => {
     const result = validateStructuralRules(tx, prefix);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
+      expect(result.reason).toMatch(/BUDGET-010/);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_STAKED_ENTITY/);
     }
   });
 
-  it("rejects when limits.execution is within budget alone but signature-verification cost pushes the total over MAX_VERIFY_GAS (item 6)", () => {
+  it("charges signature-verification cost to the sender, so it can push the sender over the staked ceiling (BUDGET-010)", () => {
     // A P256 signature costs 6700 gas (see SIGNATURE_VERIFICATION_GAS_COST).
-    // executionSum here is MAX_VERIFY_GAS - 1, comfortably under budget on
-    // its own - only adding the signature cost pushes it over.
     const almostMaxFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS - 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_STAKED_ENTITY - 1n, state: 0n },
     };
-    const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
+    const payFrame: Frame = { ...verifyFrame(APPROVE_SCOPE.PAYMENT), target: PAYER };
     const frames = [almostMaxFrame, payFrame];
     const tx: FrameTransaction = {
       ...baseTx(frames),
@@ -267,9 +267,43 @@ describe("validateStructuralRules", () => {
     const result = validateStructuralRules(tx, prefix);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
-      expect(result.reason).toMatch(/signature-verification cost 6700/);
+      expect(result.reason).toMatch(new RegExp(`entity ${SENDER.toLowerCase()}`));
+      expect(result.reason).toMatch(new RegExp(`validation gas ${MAX_VERIFY_GAS_STAKED_ENTITY - 1n + 6700n}`));
     }
+  });
+
+  it("admits an entity above MAX_VERIFY_GAS_PER_ENTITY at the structural stage and reports its gas for the stake check (BUDGET-010)", () => {
+    // A post-quantum signature checked in the sender's VERIFY frame: far over 100k, under the staked ceiling.
+    const pqFrame: Frame = {
+      ...verifyFrame(APPROVE_SCOPE.EXECUTION),
+      limits: { execution: 950_000n, state: 0n },
+    };
+    const payFrame: Frame = { ...verifyFrame(APPROVE_SCOPE.PAYMENT), target: PAYER, limits: { execution: 100_000n, state: 0n } };
+    const frames = [pqFrame, payFrame];
+    const tx = baseTx(frames);
+    const prefix = recognizeValidationPrefix(frames, SENDER)!;
+    expect(prefix).not.toBeNull();
+    const result = validateStructuralRules(tx, prefix);
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.entityVerifyGas.get(SENDER.toLowerCase())).toBe(950_000n);
+      expect(result.entityVerifyGas.get(PAYER.toLowerCase())).toBe(MAX_VERIFY_GAS_PER_ENTITY);
+    }
+  });
+
+  it("budgets entities separately: two entities that together exceed one staked ceiling still pass (BUDGET-010)", () => {
+    const senderFrame: Frame = {
+      ...verifyFrame(APPROVE_SCOPE.EXECUTION),
+      limits: { execution: MAX_VERIFY_GAS_STAKED_ENTITY, state: 0n },
+    };
+    const payFrame: Frame = {
+      ...verifyFrame(APPROVE_SCOPE.PAYMENT),
+      target: PAYER,
+      limits: { execution: MAX_VERIFY_GAS_STAKED_ENTITY, state: 0n },
+    };
+    const frames = [senderFrame, payFrame];
+    const prefix = recognizeValidationPrefix(frames, SENDER)!;
+    expect(validateStructuralRules(baseTx(frames), prefix).valid).toBe(true);
   });
 
   it("accepts when limits.execution plus signature-verification cost together stay within MAX_VERIFY_GAS", () => {
@@ -352,10 +386,10 @@ describe("validateStructuralRules", () => {
     }
   });
 
-  it("rejects when a leading expiry_verify frame's oversized limits.execution pushes the prefix sum over MAX_VERIFY_GAS (item 6)", () => {
+  it("counts a leading expiry_verify frame's limits.execution against its entity's budget (BUDGET-010)", () => {
     const expiryFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.NONE),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_STAKED_ENTITY + 1n, state: 0n },
     };
     const frames = [expiryFrame, verifyFrame(APPROVE_SCOPE.EXECUTION_AND_PAYMENT)];
     const tx = baseTx(frames);
@@ -365,7 +399,7 @@ describe("validateStructuralRules", () => {
     const result = validateStructuralRules(tx, prefix);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
+      expect(result.reason).toMatch(/BUDGET-010/);
     }
   });
 

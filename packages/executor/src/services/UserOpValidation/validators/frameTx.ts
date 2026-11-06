@@ -40,6 +40,8 @@ import {
   recognizeValidationPrefix,
   validateStructuralRules,
   ValidationPrefixMatch,
+  MAX_VERIFY_GAS_PER_ENTITY,
+  MAX_VERIFY_GAS_STAKED_ENTITY,
 } from "../utils/validationPrefix.js";
 import { NetworkConfig, StakeInfo } from "../../../interfaces.js";
 import {
@@ -313,6 +315,24 @@ export class FrameTxValidationService {
         EXPLORER_RULES.STRUCTURE,
         new RpcError(structural.reason, RpcErrorCodes.INVALID_USEROP)
       );
+    }
+    // BUDGET-010: an entity above the unstaked budget must be staked.
+    const budgetStakes = await this.resolveRoleStakes(tx, prefix);
+    for (const [role, info] of Object.entries(budgetStakes)) {
+      if (!info) continue;
+      const gas = structural.entityVerifyGas.get(info.addr.toLowerCase()) ?? BigInt(0);
+      if (gas <= MAX_VERIFY_GAS_PER_ENTITY) continue;
+      const staked =
+        BigInt(info.stake) >= this.networkConfig.minStake && BigInt(info.withdrawTime) === BigInt(0);
+      if (!staked) {
+        throw collector.failed(
+          EXPLORER_RULES.STRUCTURE,
+          new RpcError(
+            `BUDGET-010: unstaked ${role} ${info.addr} validation gas ${gas} exceeds MAX_VERIFY_GAS_PER_ENTITY ${MAX_VERIFY_GAS_PER_ENTITY}; stake the ${role} for up to ${MAX_VERIFY_GAS_STAKED_ENTITY}`,
+            RpcErrorCodes.INVALID_USEROP
+          )
+        );
+      }
     }
     collector.pass(EXPLORER_RULES.STRUCTURE);
 
