@@ -10,6 +10,21 @@ import { getAddress } from "viem";
 export const MAX_VERIFY_GAS = BigInt(100_000);
 
 /**
+ * ERC-8421 BUDGET-010: validation gas is budgeted per entity (sender, payer,
+ * factory) instead of one flat cap over the whole prefix. An unstaked entity
+ * gets MAX_VERIFY_GAS_PER_ENTITY; a staked one gets
+ * MAX_VERIFY_GAS_STAKED_ENTITY. This is what lets an expensive but legitimate
+ * check, such as a post-quantum signature verified in a VERIFY frame, into
+ * the alternative mempool while the canonical mempool keeps its 100k cap.
+ * The staked ceiling is configurable through
+ * SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY.
+ */
+export const MAX_VERIFY_GAS_PER_ENTITY = BigInt(100_000);
+export const MAX_VERIFY_GAS_STAKED_ENTITY = BigInt(
+  process.env.SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY ?? 1_000_000
+);
+
+/**
  * EIP-8141's intrinsic cost per signature, by scheme - not stated in
  * erc-7562.md (that spec states the rule, FRA-040, that this cost counts
  * against `MAX_VERIFY_GAS`, but not the constants themselves). Taken from
@@ -216,7 +231,9 @@ export function recognizeValidationPrefix(
   return null;
 }
 
-export type StructuralRulesResult = { valid: true } | { valid: false; reason: string };
+export type StructuralRulesResult =
+  | { valid: true; entityVerifyGas: Map<string, bigint> }
+  | { valid: false; reason: string };
 
 /**
  * Implements the remaining EIP-8141 §Structural Rules items not already
@@ -256,6 +273,9 @@ export function validateStructuralRules(tx: FrameTransaction, prefix: Validation
   // frame skipped by recognizeValidationPrefix (see rationale above).
   let executionSum = BigInt(0);
   let stateSum = BigInt(0);
+  // BUDGET-010: execution gas of the prefix, grouped by the entity each frame
+  // runs as. A null target is tx.sender.
+  const entityVerifyGas = new Map<string, bigint>();
   for (let i = 0; i <= lastPrefixIndex; i++) {
     const frame = tx.frames[i];
 
@@ -277,19 +297,27 @@ export function validateStructuralRules(tx: FrameTransaction, prefix: Validation
 
     executionSum += frame.limits.execution;
     stateSum += frame.limits.state;
+    const entity = (frame.target ?? tx.sender).toLowerCase();
+    entityVerifyGas.set(entity, (entityVerifyGas.get(entity) ?? BigInt(0)) + frame.limits.execution);
   }
 
   // Item 6 (FRA-040): the sum of the validation prefix's `limits.execution`,
   // PLUS the intrinsic cost of validating tx.signatures, MUST NOT exceed
   // MAX_VERIFY_GAS - see SIGNATURE_VERIFICATION_GAS_COST for where that
   // per-scheme cost comes from.
+  // Signature verification is attributed to the sender. Each entity is held
+  // to the staked ceiling here; the unstaked budget needs stake info and is
+  // enforced in FrameTxValidationService.validate.
   const sigCost = signatureVerificationCost(tx);
-  const totalVerifyGas = executionSum + sigCost;
-  if (totalVerifyGas > MAX_VERIFY_GAS) {
-    return {
-      valid: false,
-      reason: `validation prefix execution gas sum ${executionSum} + signature-verification cost ${sigCost} = ${totalVerifyGas} exceeds MAX_VERIFY_GAS ${MAX_VERIFY_GAS}`,
-    };
+  const senderKey = tx.sender.toLowerCase();
+  entityVerifyGas.set(senderKey, (entityVerifyGas.get(senderKey) ?? BigInt(0)) + sigCost);
+  for (const [entity, gas] of entityVerifyGas) {
+    if (gas > MAX_VERIFY_GAS_STAKED_ENTITY) {
+      return {
+        valid: false,
+        reason: `BUDGET-010: entity ${entity} validation gas ${gas} exceeds MAX_VERIFY_GAS_STAKED_ENTITY ${MAX_VERIFY_GAS_STAKED_ENTITY}`,
+      };
+    }
   }
   if (stateSum > MAX_VERIFY_STATE_GAS) {
     return {
@@ -310,5 +338,5 @@ export function validateStructuralRules(tx: FrameTransaction, prefix: Validation
     }
   }
 
-  return { valid: true };
+  return { valid: true, entityVerifyGas };
 }
