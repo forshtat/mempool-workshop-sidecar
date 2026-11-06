@@ -307,7 +307,24 @@ export class FrameTxValidationService {
     }
     collector.pass(EXPLORER_RULES.PREFIX);
 
-    const structural = validateStructuralRules(tx, prefix);
+    // ERC-8421 BUDGET-010 (item 6 of validateStructuralRules) sizes each
+    // entity's verification gas budget by whether it is staked, so stakes are
+    // resolved before the structural checks (the acceptance algorithm's
+    // step 3, before simulation and tracing). "Staked" is the same
+    // ReputationService.checkStake verdict the staked-entity storage rules
+    // use; checkEntityCompliance reuses both roleStakes and the memoized
+    // verdicts instead of looking them up again.
+    const roleStakes = await this.resolveRoleStakes(tx, prefix);
+    const stakeCheckCache = new Map<string, { code: number; msg: string }>();
+    const stakedEntities = new Set<string>();
+    for (const info of Object.values(roleStakes)) {
+      const { code } = await this.checkStakeCached(info, stakeCheckCache);
+      if (code === 0) stakedEntities.add(info.addr.toLowerCase());
+    }
+
+    const structural = validateStructuralRules(tx, prefix, (entity) =>
+      stakedEntities.has(entity.toLowerCase())
+    );
     if (!structural.valid) {
       throw collector.failed(
         EXPLORER_RULES.STRUCTURE,
@@ -445,6 +462,8 @@ export class FrameTxValidationService {
       tx,
       prefix,
       lastPrefixIndex,
+      roleStakes,
+      stakeCheckCache,
       collector
     );
     return {
@@ -518,6 +537,10 @@ export class FrameTxValidationService {
     tx: FrameTransaction,
     prefix: ValidationPrefixMatch,
     lastPrefixIndex: number,
+    roleStakes: Partial<Record<EntityRole, StakeInfo & { addr: Hex }>>,
+    // Memoizes ReputationService.checkStake per address for the duration of
+    // one validate() call (see checkStakeCached).
+    stakeCheckCache: Map<string, { code: number; msg: string }>,
     collector: CheckCollector
   ): Promise<Omit<FrameTxValidationResult, "maxCost">> {
     let satisfiesStandardMempool = true; // false if some entity is in whitelist
@@ -579,11 +602,7 @@ export class FrameTxValidationService {
     }
     collector.pass(EXPLORER_RULES.EXECUTION);
 
-    const roleStakes = await this.resolveRoleStakes(tx, prefix);
     const hasFactory = prefix.frames.some((f) => f.role === "factory");
-    // Memoizes ReputationService.checkStake per address for the
-    // duration of this validate() call.
-    const stakeCheckCache = new Map<string, { code: number; msg: string }>();
 
     const entitySlots: { [addr: string]: Set<string> } = parseEntitySlots(
       roleStakes,

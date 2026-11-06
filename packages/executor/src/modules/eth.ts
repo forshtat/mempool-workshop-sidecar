@@ -374,10 +374,10 @@ export class Eth {
    *
    * Validation-PREFIX frames are deliberately left at the caller-supplied
    * limits instead: `frameTxSimulationService.simulate` internally calls
-   * `FrameTxValidationService.validate`, which enforces EIP-8141's real
-   * per-prefix gas caps (`validateStructuralRules`,
-   * `MAX_VERIFY_GAS`/`MAX_VERIFY_STATE_GAS` in
-   * `UserOpValidation/utils/validationPrefix.ts`) over
+   * `FrameTxValidationService.validate`, which enforces the real
+   * validation-prefix gas caps (`validateStructuralRules`: the per-entity
+   * `MAX_VERIFY_GAS_PER_ENTITY`/`MAX_VERIFY_GAS_STAKED_ENTITY` budgets and
+   * `MAX_VERIFY_STATE_GAS` in `UserOpValidation/utils/validationPrefix.ts`) over
    * `tx.frames[0..lastPrefixIndex]`. Slapping the same generous placeholder
    * on prefix frames (as this method used to do) always exceeds those caps
    * and makes every estimate call fail regardless of input (fix round #1,

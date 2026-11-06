@@ -62,9 +62,10 @@ describe("frame tx e2e: mempool cancellation surfaces as a dropped outcome", () 
   it(
     "cancels an admitted transaction once its payer is banned, and the Activity list shows it dropped",
     async () => {
-      // Canonical Paymaster shape, well under MAX_VERIFY_GAS (100_000) so it
-      // is admitted cleanly - see frameTxRejection.e2e.test.ts's identical
-      // shape for the rejected (over-limit) counterexample.
+      // Canonical Paymaster shape, each entity well under
+      // MAX_VERIFY_GAS_PER_ENTITY (100_000) so it is admitted cleanly - see
+      // frameTxRejection.e2e.test.ts's identical shape for the rejected
+      // (over-budget) counterexample.
       const tx: FrameTransaction = {
         chainId: BigInt(CHAIN_ID),
         nonceKeys: [0n],

@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   recognizeValidationPrefix,
   validateStructuralRules,
-  MAX_VERIFY_GAS,
+  MAX_VERIFY_GAS_PER_ENTITY,
+  MAX_VERIFY_GAS_STAKED_ENTITY,
   MAX_VERIFY_STATE_GAS,
 } from "../../../../src/services/UserOpValidation/utils/validationPrefix.js";
 import { FRAME_MODE, APPROVE_SCOPE, ATOMIC_BATCH_FLAG, Frame, FrameTransaction, SIG_SCHEME, SignatureEntry } from "@skandha/types/lib/contracts/FrameTx.js";
@@ -43,6 +44,10 @@ const preVerifyFrame = (target: `0x${string}` | null): Frame => ({
   value: 0n,
   data: "0x" as const,
 });
+
+// The stake predicate validateStructuralRules takes for ERC-8421 BUDGET-010:
+// no entity is staked.
+const UNSTAKED = (_entity: `0x${string}`): boolean => false;
 
 const baseTx = (frames: Frame[]): FrameTransaction => ({
   chainId: 1n,
@@ -207,7 +212,7 @@ describe("validateStructuralRules", () => {
     const frames = [verifyFrame(APPROVE_SCOPE.EXECUTION_AND_PAYMENT), userOpFrame()];
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(true);
   });
 
@@ -217,37 +222,37 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/ATOMIC_BATCH_FLAG/);
     }
   });
 
-  it("rejects when the sum of limits.execution across the prefix exceeds MAX_VERIFY_GAS (item 6)", () => {
+  it("rejects when an unstaked entity's limits.execution sum exceeds MAX_VERIFY_GAS_PER_ENTITY (item 6, BUDGET-010)", () => {
     const bigFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_PER_ENTITY + 1n, state: 0n },
     };
     const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
     const frames = [bigFrame, payFrame];
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
     }
   });
 
-  it("rejects when limits.execution is within budget alone but signature-verification cost pushes the total over MAX_VERIFY_GAS (item 6)", () => {
+  it("rejects when limits.execution is within budget alone but signature-verification cost pushes the sender over MAX_VERIFY_GAS_PER_ENTITY (item 6, BUDGET-010)", () => {
     // A P256 signature costs 6700 gas (see SIGNATURE_VERIFICATION_GAS_COST).
-    // executionSum here is MAX_VERIFY_GAS - 1, comfortably under budget on
-    // its own - only adding the signature cost pushes it over.
+    // executionSum here is MAX_VERIFY_GAS_PER_ENTITY - 1, comfortably under
+    // budget on its own - only adding the signature cost pushes it over.
     const almostMaxFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS - 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_PER_ENTITY - 1n, state: 0n },
     };
     const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
     const frames = [almostMaxFrame, payFrame];
@@ -264,15 +269,15 @@ describe("validateStructuralRules", () => {
     };
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
       expect(result.reason).toMatch(/signature-verification cost 6700/);
     }
   });
 
-  it("accepts when limits.execution plus signature-verification cost together stay within MAX_VERIFY_GAS", () => {
+  it("accepts when limits.execution plus signature-verification cost together stay within MAX_VERIFY_GAS_PER_ENTITY", () => {
     const smallFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
       limits: { execution: 1000n, state: 0n },
@@ -292,7 +297,7 @@ describe("validateStructuralRules", () => {
     };
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(true);
   });
 
@@ -305,7 +310,7 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/MAX_VERIFY_STATE_GAS/);
@@ -317,7 +322,7 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/VERIFY frame after the validation prefix/);
@@ -329,7 +334,7 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(true);
   });
 
@@ -344,7 +349,7 @@ describe("validateStructuralRules", () => {
     // — this is what makes the bug possible if validateStructuralRules only
     // scanned prefix.frames instead of tx.frames[0..lastPrefixIndex].
     expect(prefix.frames.some((f) => f.frameIndex === 0)).toBe(false);
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/ATOMIC_BATCH_FLAG/);
@@ -352,20 +357,20 @@ describe("validateStructuralRules", () => {
     }
   });
 
-  it("rejects when a leading expiry_verify frame's oversized limits.execution pushes the prefix sum over MAX_VERIFY_GAS (item 6)", () => {
+  it("rejects a leading expiry_verify frame whose oversized limits.execution exceeds MAX_VERIFY_GAS_PER_ENTITY (item 6, BUDGET-010)", () => {
     const expiryFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.NONE),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS_PER_ENTITY + 1n, state: 0n },
     };
     const frames = [expiryFrame, verifyFrame(APPROVE_SCOPE.EXECUTION_AND_PAYMENT)];
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
     expect(prefix.frames.some((f) => f.frameIndex === 0)).toBe(false);
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
     }
   });
 
@@ -376,7 +381,7 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(true);
   });
 
@@ -387,7 +392,7 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/tx\.sender/);
@@ -401,10 +406,180 @@ describe("validateStructuralRules", () => {
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
+    const result = validateStructuralRules(tx, prefix, UNSTAKED);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.reason).toMatch(/tx\.sender/);
     }
+  });
+});
+
+describe("validateStructuralRules: per-entity verification gas budgets (ERC-8421 BUDGET-010)", () => {
+  const FACTORY = "0x3333333333333333333333333333333333333333" as const; // deployFrame()'s target
+
+  const withExecution = (frame: Frame, execution: bigint): Frame => ({
+    ...frame,
+    limits: { ...frame.limits, execution },
+  });
+  const selfVerify = (execution: bigint) => withExecution(verifyFrame(APPROVE_SCOPE.EXECUTION_AND_PAYMENT), execution);
+  const onlyVerify = (execution: bigint) => withExecution(verifyFrame(APPROVE_SCOPE.EXECUTION), execution);
+  const pay = (execution: bigint): Frame => ({ ...withExecution(verifyFrame(APPROVE_SCOPE.PAYMENT), execution), target: PAYER });
+  const preVerify = (target: `0x${string}` | null, execution: bigint) => withExecution(preVerifyFrame(target), execution);
+  const deploy = (execution: bigint) => withExecution(deployFrame(), execution);
+
+  /** Only the given addresses are staked. */
+  const stakedOnly =
+    (...staked: `0x${string}`[]) =>
+    (entity: `0x${string}`): boolean =>
+      staked.some((s) => s.toLowerCase() === entity.toLowerCase());
+
+  // 6700 gas, see SIGNATURE_VERIFICATION_GAS_COST.
+  const P256_SIGNATURE = {
+    scheme: SIG_SCHEME.P256,
+    signer: "0x2222222222222222222222222222222222222222",
+    msg: "0x",
+    signature: "0x",
+  } as SignatureEntry;
+
+  const check = (
+    frames: Frame[],
+    isStakedEntity: (entity: `0x${string}`) => boolean = UNSTAKED,
+    signatures: SignatureEntry[] = []
+  ) => {
+    const prefix = recognizeValidationPrefix(frames, SENDER);
+    expect(prefix).not.toBeNull();
+    return validateStructuralRules({ ...baseTx(frames), signatures }, prefix!, isStakedEntity);
+  };
+
+  it("accepts an unstaked entity at exactly MAX_VERIFY_GAS_PER_ENTITY and rejects it one gas above", () => {
+    expect(check([selfVerify(MAX_VERIFY_GAS_PER_ENTITY), userOpFrame()]).valid).toBe(true);
+
+    const result = check([selfVerify(MAX_VERIFY_GAS_PER_ENTITY + 1n), userOpFrame()]);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/unstaked sender/);
+      expect(result.reason).toContain(SENDER);
+      expect(result.reason).toMatch(/exceeds MAX_VERIFY_GAS_PER_ENTITY 100000/);
+    }
+  });
+
+  it("accepts a staked sender up to MAX_VERIFY_GAS_STAKED_ENTITY and rejects it above", () => {
+    const staked = stakedOnly(SENDER);
+    expect(check([selfVerify(MAX_VERIFY_GAS_STAKED_ENTITY), userOpFrame()], staked).valid).toBe(true);
+
+    const result = check([selfVerify(MAX_VERIFY_GAS_STAKED_ENTITY + 1n), userOpFrame()], staked);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/^staked sender/);
+      expect(result.reason).toMatch(/exceeds MAX_VERIFY_GAS_STAKED_ENTITY 1000000/);
+    }
+  });
+
+  it("gives the sender and the payer a budget each, rather than one combined budget", () => {
+    // 200_000 in total, over EIP-8141's single combined MAX_VERIFY_GAS, but
+    // each entity stays within its own MAX_VERIFY_GAS_PER_ENTITY.
+    expect(check([onlyVerify(MAX_VERIFY_GAS_PER_ENTITY), pay(MAX_VERIFY_GAS_PER_ENTITY)]).valid).toBe(true);
+  });
+
+  it("does not let a staked payer's budget raise an unstaked sender's", () => {
+    const staked = stakedOnly(PAYER);
+    expect(check([onlyVerify(MAX_VERIFY_GAS_PER_ENTITY), pay(MAX_VERIFY_GAS_STAKED_ENTITY)], staked).valid).toBe(true);
+
+    const result = check([onlyVerify(MAX_VERIFY_GAS_PER_ENTITY + 1n), pay(1n)], staked);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/unstaked sender/);
+      expect(result.reason).toContain(SENDER);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
+    }
+  });
+
+  it("does not let a staked sender's budget raise an unstaked payer's", () => {
+    const result = check([onlyVerify(1n), pay(MAX_VERIFY_GAS_PER_ENTITY + 1n)], stakedOnly(SENDER));
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/unstaked payer/);
+      expect(result.reason).toContain(PAYER);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
+    }
+  });
+
+  it("counts the signature-verification cost toward tx.sender, not toward the payer", () => {
+    const overBySignature = check(
+      [onlyVerify(MAX_VERIFY_GAS_PER_ENTITY - 6700n + 1n), pay(1n)],
+      UNSTAKED,
+      [P256_SIGNATURE]
+    );
+    expect(overBySignature.valid).toBe(false);
+    if (!overBySignature.valid) {
+      expect(overBySignature.reason).toMatch(/unstaked sender/);
+      expect(overBySignature.reason).toMatch(/signature-verification cost 6700/);
+    }
+
+    // The payer's own frames use its whole budget; the signature cost is not
+    // charged to it.
+    expect(check([onlyVerify(1n), pay(MAX_VERIFY_GAS_PER_ENTITY)], UNSTAKED, [P256_SIGNATURE]).valid).toBe(true);
+  });
+
+  it("counts a pre_verify frame toward the entity of the approving frame it precedes", () => {
+    // [only_verify, pre_verify(payer), pay]: the pre_verify frame and the pay
+    // frame share the payer's budget.
+    const payerOver = check([onlyVerify(1n), preVerify(PAYER, 50_001n), pay(50_000n)]);
+    expect(payerOver.valid).toBe(false);
+    if (!payerOver.valid) {
+      expect(payerOver.reason).toMatch(/unstaked payer/);
+      expect(payerOver.reason).toContain(PAYER);
+    }
+
+    // [pre_verify(sender), only_verify, pay]: the pre_verify frame counts
+    // toward the sender, leaving the payer's budget untouched.
+    expect(check([preVerify(null, 50_000n), onlyVerify(50_000n), pay(MAX_VERIFY_GAS_PER_ENTITY)]).valid).toBe(true);
+    const senderOver = check([preVerify(null, 50_000n), onlyVerify(50_001n), pay(1n)]);
+    expect(senderOver.valid).toBe(false);
+    if (!senderOver.valid) {
+      expect(senderOver.reason).toMatch(/unstaked sender/);
+    }
+
+    // A staked payer's pre_verify and pay frames share its larger budget.
+    const staked = stakedOnly(PAYER);
+    expect(check([onlyVerify(1n), preVerify(PAYER, 500_000n), pay(500_000n)], staked).valid).toBe(true);
+    expect(check([onlyVerify(1n), preVerify(PAYER, 500_000n), pay(500_001n)], staked).valid).toBe(false);
+  });
+
+  it("gives frames that resolve to the same address one budget between them", () => {
+    // A pay frame with a null target resolves to tx.sender: one entity, so
+    // 60_000 + 60_000 is summed against the sender's single budget.
+    const selfPay = withExecution(verifyFrame(APPROVE_SCOPE.PAYMENT), 60_000n);
+    const result = check([onlyVerify(60_000n), selfPay]);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/unstaked sender/);
+      expect(result.reason).toMatch(/120000/);
+    }
+  });
+
+  it("bounds the factory's deploy frame by the factory's own budget", () => {
+    const result = check([deploy(MAX_VERIFY_GAS_PER_ENTITY + 1n), selfVerify(1n)], stakedOnly(SENDER));
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/unstaked factory/);
+      expect(result.reason).toContain(FACTORY);
+    }
+
+    expect(check([deploy(MAX_VERIFY_GAS_STAKED_ENTITY), selfVerify(1n)], stakedOnly(FACTORY)).valid).toBe(true);
+  });
+
+  it("bounds a leading expiry_verify frame by MAX_VERIFY_GAS_PER_ENTITY even when every entity is staked, as it belongs to no entity", () => {
+    const expiry = withExecution(verifyFrame(APPROVE_SCOPE.NONE), MAX_VERIFY_GAS_PER_ENTITY + 1n);
+    const result = check([expiry, selfVerify(1n)], stakedOnly(SENDER));
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toMatch(/frame 0 \(expiry_verify\) belongs to no entity/);
+      expect(result.reason).toMatch(/MAX_VERIFY_GAS_PER_ENTITY/);
+    }
+
+    // Its gas is not charged to the sender either.
+    const expiryAtCap = withExecution(verifyFrame(APPROVE_SCOPE.NONE), MAX_VERIFY_GAS_PER_ENTITY);
+    expect(check([expiryAtCap, selfVerify(MAX_VERIFY_GAS_PER_ENTITY)]).valid).toBe(true);
   });
 });

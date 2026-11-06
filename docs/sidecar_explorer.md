@@ -793,7 +793,7 @@ Global rules run once per transaction, in this order (`mempool` is the last one)
 | `gas-limit`       | The sum of all frames' execution and state gas limits is within this node's per-transaction cap. |
 | `recent-root`     | Every EIP-8272 recent-root reference is usable: within the slot window (checked before simulating) and committed on chain (checked by the simulation). Passes at once for a transaction without references. |
 | `prefix`          | The leading frames form a recognized validation prefix (sender, payer and factory roles). |
-| `structure`       | The prefix follows the EIP-8141 structural rules (frame targets, flags, verification gas limits). |
+| `structure`       | The prefix follows the EIP-8141 structural rules (frame targets, flags, state gas limit), and each entity's validation frames stay within its ERC-8421 verification gas budget (BUDGET-010: 100,000 unstaked, 1,000,000 staked). |
 | `signature`       | Every entry of the transaction's `signatures` verifies.                              |
 | `simulation`      | The execution client's traced simulation of the transaction succeeded and returned a trace. |
 | `trace-alignment` | The trace lines up with the frames: one top-level call per prefix frame. Also reported once per entity, checking that the entity's frame called the expected address. |

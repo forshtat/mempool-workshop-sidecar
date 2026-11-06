@@ -38,12 +38,11 @@ import { FRAME_MODE, APPROVE_SCOPE, SIG_SCHEME, FrameTransaction } from "@skandh
  *
  * 2. A transaction that is fully ERC-7562-clean (the same unconditional-
  *    APPROVE wallet/paymaster contracts the real-inclusion e2e test already
- *    proved work end-to-end) but whose validation-prefix declares more
- *    `limits.execution` than EIP-8141's own `MAX_VERIFY_GAS` (100_000)
- *    mempool-policy cap allows. `MAX_VERIFY_GAS` is a "Public Mempool"
- *    admission heuristic (EIP-8141 §Constants: "Maximum amount of gas a
- *    node SHOULD expend validating..."), not a protocol/consensus validity
- *    rule ethrex itself enforces - ethrex would mine this transaction fine.
+ *    proved work end-to-end) but whose unstaked sender declares more
+ *    `limits.execution` than ERC-8421's per-entity budget
+ *    (`MAX_VERIFY_GAS_PER_ENTITY`, 100_000, BUDGET-010) allows. That budget
+ *    is a mempool admission rule, not a protocol/consensus validity rule
+ *    ethrex itself enforces - ethrex would mine this transaction fine.
  *    Rejecting it anyway, on a tx with no banned opcodes and no forbidden
  *    storage access, is exactly what distinguishes the sidecar's mempool as an
  *    EIP-8141-*specific* alternative mempool rather than a thin relay that
@@ -136,15 +135,17 @@ describe("frame tx e2e: admission-time rejection", () => {
   );
 
   it(
-    "rejects an ERC-7562-clean frame transaction that exceeds EIP-8141's own MAX_VERIFY_GAS",
+    "rejects an ERC-7562-clean frame transaction whose unstaked sender exceeds MAX_VERIFY_GAS_PER_ENTITY",
     async () => {
       // Canonical Paymaster shape [only_verify, pay] - both frames are the
       // same unconditional-APPROVE contracts the real-inclusion e2e test
       // proved land on-chain successfully (genesis-preloaded copies - see
       // DEV_GENESIS_WALLET_ADDRESS's doc comment in helpers.ts); no banned
-      // opcode, no forbidden storage access. Only difference:
-      // limits.execution is inflated well past MAX_VERIFY_GAS (100_000) on
-      // both prefix frames.
+      // opcode, no forbidden storage access. Only difference: the
+      // unstaked sender's only_verify frame declares more limits.execution
+      // than MAX_VERIFY_GAS_PER_ENTITY (100_000). The budget is per entity
+      // (ERC-8421 BUDGET-010), so the payer's frame does not count toward
+      // it: 60_000 on each frame, as this test used before, is admitted.
       const tx: FrameTransaction = {
         chainId: BigInt(CHAIN_ID),
         nonceKeys: [0n],
@@ -155,7 +156,7 @@ describe("frame tx e2e: admission-time rejection", () => {
             mode: FRAME_MODE.VERIFY,
             flags: APPROVE_SCOPE.EXECUTION,
             target: null,
-            limits: { execution: 60_000n, state: 0n }, // + pay's 60_000 = 120_000 > MAX_VERIFY_GAS
+            limits: { execution: 120_000n, state: 0n }, // > MAX_VERIFY_GAS_PER_ENTITY, the sender is unstaked
             value: 0n,
             data: "0x",
           },
@@ -189,9 +190,9 @@ describe("frame tx e2e: admission-time rejection", () => {
       const sent = await rpc(urlA, "eth_sendFrameTransaction", [toWire(tx)]);
       expect(
         sent.error,
-        `expected rejection for exceeding MAX_VERIFY_GAS, got: ${JSON.stringify(sent)}\n--- node A log ---\n${tailLog(dirA, "nodeA")}`
+        `expected rejection for exceeding MAX_VERIFY_GAS_PER_ENTITY, got: ${JSON.stringify(sent)}\n--- node A log ---\n${tailLog(dirA, "nodeA")}`
       ).toBeDefined();
-      expect(sent.error!.message).toMatch(/exceeds MAX_VERIFY_GAS/);
+      expect(sent.error!.message).toMatch(/unstaked sender .*exceeds MAX_VERIFY_GAS_PER_ENTITY/);
     },
     120_000
   );

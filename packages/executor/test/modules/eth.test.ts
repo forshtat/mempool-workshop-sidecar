@@ -318,7 +318,8 @@ describe("Eth.estimateFrameTransactionGas", () => {
             RpcErrorCodes.INVALID_OPCODE
           );
         }
-        const structural = validateStructuralRules(tx, prefix);
+        // No entity staked: every entity gets MAX_VERIFY_GAS_PER_ENTITY.
+        const structural = validateStructuralRules(tx, prefix, () => false);
         if (!structural.valid) {
           throw new RpcError(structural.reason, RpcErrorCodes.INVALID_USEROP);
         }

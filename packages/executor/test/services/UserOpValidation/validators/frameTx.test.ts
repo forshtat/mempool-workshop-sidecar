@@ -1216,3 +1216,78 @@ describe("FrameTxValidationService: ethrex's structured failure detail", () => {
     expect(await message({ canonicalMempoolViolation: "BannedOpcode(66)" })).toBe("banned opcode: TIMESTAMP (0x42)");
   });
 });
+
+describe("FrameTxValidationService: per-entity verification gas budgets (ERC-8421 BUDGET-010)", () => {
+  // Real ReputationService.checkStake (minStake 1e9, minUnstakeDelay 0), so
+  // "staked" here means exactly what STAKING-010 and the staked-entity
+  // storage rules mean by it. fakeStakingRegistry(addr) gives `addr` a
+  // stake of 1e10 with a 100 s delay.
+  let dbCount = 0;
+  const reputation = () =>
+    new ReputationService(
+      new LocalDbController(`test-frameTx-budget-${dbCount++}`),
+      1337,
+      10,
+      10,
+      50,
+      1_000_000_000n,
+      0
+    );
+  const service = (registry: StakingRegistryService) =>
+    new FrameTxValidationService(registry, reputation(), fakeNetworkConfig(), fakeLogger());
+
+  const withExecution = (frame: Frame, execution: bigint): Frame => ({
+    ...frame,
+    limits: { ...frame.limits, execution },
+  });
+  const selfRelay = (execution: bigint) => baseTx([withExecution(selfVerifyFrame(), execution)]);
+  const selfRelayTrace = () => fakeEthrexResult([ethrexFrame({ from: ENTRY_POINT, to: SENDER })]);
+  const sponsored = (senderExecution: bigint, payerExecution: bigint) =>
+    baseTx([withExecution(onlyVerifyFrame(), senderExecution), withExecution(payFrame(PAYER), payerExecution)]);
+  const sponsoredTrace = () =>
+    fakeEthrexResult([
+      ethrexFrame({ from: ENTRY_POINT, to: SENDER }),
+      ethrexFrame({ from: ENTRY_POINT, to: PAYER }),
+    ]);
+
+  it("admits a staked sender's self_verify frame up to MAX_VERIFY_GAS_STAKED_ENTITY", async () => {
+    await expect(
+      service(fakeStakingRegistry(SENDER)).validate(selfRelay(1_000_000n), selfRelayTrace())
+    ).resolves.toMatchObject({ mempoolMembership: { [STANDARD_MEMPOOL_ID]: true } });
+  });
+
+  it("rejects a staked sender's self_verify frame above MAX_VERIFY_GAS_STAKED_ENTITY", async () => {
+    await expect(
+      service(fakeStakingRegistry(SENDER)).validate(selfRelay(1_000_001n), selfRelayTrace())
+    ).rejects.toThrow(/^staked sender .*exceeds MAX_VERIFY_GAS_STAKED_ENTITY 1000000/);
+  });
+
+  it("rejects an unstaked sender's self_verify frame above MAX_VERIFY_GAS_PER_ENTITY, under 'structure'", async () => {
+    const collector = new CheckCollector();
+    await expect(
+      service(fakeStakingRegistry()).validate(selfRelay(100_001n), selfRelayTrace(), collector)
+    ).rejects.toMatchObject({ code: RpcErrorCodes.INVALID_USEROP });
+    expect(collector.toChecks().find((c) => c.rule === "structure")).toMatchObject({
+      verdict: "fail",
+      detail: expect.stringMatching(/unstaked sender .*exceeds MAX_VERIFY_GAS_PER_ENTITY 100000/),
+    });
+  });
+
+  it("gives a sender whose stake withdrawal has started only the unstaked budget (STAKING-010)", async () => {
+    await expect(
+      service(fakeStakingRegistry(SENDER, 123n)).validate(selfRelay(500_000n), selfRelayTrace())
+    ).rejects.toThrow(/unstaked sender .*MAX_VERIFY_GAS_PER_ENTITY/);
+  });
+
+  it("does not let a staked paymaster's budget raise an unstaked sender's", async () => {
+    await expect(
+      service(fakeStakingRegistry(PAYER)).validate(sponsored(200_000n, 1n), sponsoredTrace())
+    ).rejects.toThrow(/unstaked sender .*MAX_VERIFY_GAS_PER_ENTITY/);
+  });
+
+  it("admits an unstaked sender alongside a staked paymaster's heavy pay frame", async () => {
+    await expect(
+      service(fakeStakingRegistry(PAYER)).validate(sponsored(100_000n, 900_000n), sponsoredTrace())
+    ).resolves.toMatchObject({ mempoolMembership: { [STANDARD_MEMPOOL_ID]: true } });
+  });
+});

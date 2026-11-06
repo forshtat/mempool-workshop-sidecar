@@ -330,9 +330,9 @@ export function stopMiningDevnet(): void {
  * (implicitly `tx.sender`) - followed by one SENDER-mode body frame doing a
  * plain value transfer.
  *
- * Prefix gas stays well inside EIP-8141's `MAX_VERIFY_GAS` (100k) and
- * `MAX_VERIFY_STATE_GAS` (500k) caps, which `validateStructuralRules`
- * enforces over the prefix.
+ * Prefix gas stays well inside the unstaked per-entity budget
+ * (`MAX_VERIFY_GAS_PER_ENTITY`, 100k) and the `MAX_VERIFY_STATE_GAS` (500k)
+ * cap, which `validateStructuralRules` enforces over the prefix.
  */
 export function buildUnsignedFrameTx(
   nonce: bigint,

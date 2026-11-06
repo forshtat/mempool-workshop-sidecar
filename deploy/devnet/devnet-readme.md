@@ -287,8 +287,9 @@ Gotchas (each cost a CI round to find):
   fresh address (the body frame itself used about 3,000 gas). Transfers to existing accounts do
   not need it.
 - **More nonce keys cost more validation gas.** A `VERIFY` frame with 7 nonce keys ran out of gas
-  at `0x7530` (30,000) and succeeded at `0x13880` (80,000). `MAX_VERIFY_GAS` is 100,000, so the
-  headroom shrinks toward the 16-key maximum.
+  at `0x7530` (30,000) and succeeded at `0x13880` (80,000). An unstaked sender's verification gas
+  budget (`MAX_VERIFY_GAS_PER_ENTITY`) is 100,000, so the headroom shrinks toward the 16-key
+  maximum. A staked sender gets `MAX_VERIFY_GAS_STAKED_ENTITY` (1,000,000) instead.
 - **Fund a paymaster via the `value` of its `CREATE`**, never by a later plain transfer. Any
   external call, even an empty-calldata transfer, runs the contract's runtime code, which calls
   `APPROVE` outside a frame context and halts - so the transfer silently reverts.
