@@ -48,3 +48,44 @@ describe("Config.getNetworkConfig stakingRegistryAddress", () => {
     }
   });
 });
+
+describe("Config.getNetworkConfig BUDGET-010 budgets", () => {
+  const withEnv = (env: Record<string, string>, fn: () => void) => {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(env)) {
+      prev[k] = process.env[k];
+      process.env[k] = env[k];
+    }
+    try {
+      fn();
+    } finally {
+      for (const k of Object.keys(env)) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k];
+      }
+    }
+  };
+
+  it("defaults to ERC-8421's MAX_VERIFY_GAS_PER_ENTITY 100000 / MAX_VERIFY_GAS_STAKED_ENTITY 1000000", () => {
+    const nc = new Config({ config: null, unsafeMode: false, redirectRpc: false }).getNetworkConfig();
+    expect(nc.maxVerifyGasPerEntity).toBe(100_000);
+    expect(nc.maxVerifyGasStakedEntity).toBe(1_000_000);
+  });
+
+  it("reads SKANDHA_MAX_VERIFY_GAS_PER_ENTITY / SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY", () => {
+    withEnv({ SKANDHA_MAX_VERIFY_GAS_PER_ENTITY: "250000", SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY: "2500000" }, () => {
+      const nc = new Config({ config: null, unsafeMode: false, redirectRpc: false }).getNetworkConfig();
+      expect(nc.maxVerifyGasPerEntity).toBe(250_000);
+      expect(nc.maxVerifyGasStakedEntity).toBe(2_500_000);
+    });
+  });
+
+  it("rejects a staked budget below the unstaked one, and non-positive values", () => {
+    withEnv({ SKANDHA_MAX_VERIFY_GAS_PER_ENTITY: "500000", SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY: "400000" }, () => {
+      expect(() => new Config({ config: null, unsafeMode: false, redirectRpc: false })).toThrow(/maxVerifyGasStakedEntity/);
+    });
+    withEnv({ SKANDHA_MAX_VERIFY_GAS_PER_ENTITY: "0" }, () => {
+      expect(() => new Config({ config: null, unsafeMode: false, redirectRpc: false })).toThrow(/maxVerifyGasPerEntity/);
+    });
+  });
+});

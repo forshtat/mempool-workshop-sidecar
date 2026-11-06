@@ -128,6 +128,8 @@ file — `SKANDHA_RELAYERS`, `SKANDHA_BENEFICIARY`, `SKANDHA_RPC`, and similar.
   "minStake": 10000000000, // optional, minimum entity stake in wei
   "minUnstakeDelay": 0, // optional, minimum entity unstake delay
   "stakingRegistryAddress": "0x...", // optional, EIP-8421 IStakingRegistry contract address; unset/zero means every entity reads as unstaked
+  "maxVerifyGasPerEntity": 100000, // optional, ERC-8421 BUDGET-010 budget for an unstaked entity's validation frames (env SKANDHA_MAX_VERIFY_GAS_PER_ENTITY)
+  "maxVerifyGasStakedEntity": 1000000, // optional, ERC-8421 BUDGET-010 budget for a staked entity (env SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY); both are reported by skandha_config.budgets
   "minSignerBalance": 1, // optional, minimum relayer balance (in ETH) before it stops being used as a fee collector
   "multicall": "0xcA11bde05977b3631167028862bE2a173976CA11", // optional, multicall3 contract address
   "estimationStaticBuffer": 21000, // optional, gas added to callGasLimit on estimation

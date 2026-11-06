@@ -36,6 +36,15 @@ import { BaseRelayer } from "./base.js";
  * per newly observed block against every `Submitted` entry via
  * `ReceiptService` - see that class's doc comment.
  *
+ * ERC-8421 [BUDGET-010] depends on this route: a staked entity may be
+ * admitted with up to `maxVerifyGasStakedEntity` (default 1,000,000) of
+ * validation gas, while ethrex's own public-mempool admission
+ * (`eth_sendRawTransaction`) still applies EIP-8141's single combined
+ * `MAX_VERIFY_GAS` (100,000) and would refuse such a transaction. The
+ * privileged method skips that check, so every admitted transaction - over
+ * 100k or not - is relayed the same way. Switching to a public submission
+ * method would silently drop staked over-budget transactions.
+ *
  * `eth_sendRawTransactionConditional` (with `{knownAccounts: storageMap}`) is
  * also dropped. Its preconditions came from a bundle's merged validation
  * storage map, and its purpose was to stop the bundler paying for a batch

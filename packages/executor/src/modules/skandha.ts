@@ -13,6 +13,7 @@ import { GetNodeAPI, NetworkConfig } from "../interfaces.js";
 import { Config } from "../config.js";
 import { MempoolService } from "../services/index.js";
 import { FrameTransactionStatus } from "./interfaces.js";
+import { MAX_VERIFY_STATE_GAS } from "../services/UserOpValidation/utils/validationPrefix.js";
 
 /**
  * EIP-8141 frame-transaction adaptation of sidecar's custom RPC surface.
@@ -107,6 +108,13 @@ export class Skandha {
       banSlack: this.networkConfig.banSlack,
       minStake: this.networkConfig.minStake.toString(),
       minUnstakeDelay: this.networkConfig.minUnstakeDelay,
+      budgets: {
+        rule: "BUDGET-010",
+        maxVerifyGasPerEntity: this.networkConfig.maxVerifyGasPerEntity,
+        maxVerifyGasStakedEntity: this.networkConfig.maxVerifyGasStakedEntity,
+        signatureCostAttributedTo: "sender",
+        maxVerifyStateGas: Number(MAX_VERIFY_STATE_GAS),
+      },
       minSignerBalance: `${formatEther(
         this.networkConfig.minSignerBalance
       )} eth`,

@@ -37,9 +37,13 @@ import { computeSigHash } from "../../FrameTxService/codec.js";
 import { validateSignature } from "../../FrameTxService/signature.js";
 import { selectPrefixTrace } from "../erc7562TraceAdapter.js";
 import {
+  checkVerifyGasBudgets,
+  computeEntityVerifyGas,
+  DEFAULT_VERIFY_GAS_BUDGETS,
   recognizeValidationPrefix,
   validateStructuralRules,
   ValidationPrefixMatch,
+  VerifyGasBudgets,
 } from "../utils/validationPrefix.js";
 import { NetworkConfig, StakeInfo } from "../../../interfaces.js";
 import {
@@ -200,8 +204,59 @@ export class FrameTxValidationService {
     private networkConfig: NetworkConfig,
     private logger: Logger,
     /** Reads an account's balance, to say when a payer cannot afford a transaction. Optional. */
-    private getBalance?: (address: Hex) => Promise<bigint>
+    private getBalance?: (address: Hex) => Promise<bigint>,
+    /**
+     * Reads an account's code, so a default-code entity (empty code) is never
+     * treated as staked for [BUDGET-010] (ERC-8421 Definitions item 5).
+     * Optional: without it, stake alone decides.
+     */
+    private getCode?: (address: Hex) => Promise<Hex | undefined>
   ) {}
+
+  /**
+   * The [BUDGET-010] limits this node enforces: `NetworkConfig`'s
+   * `maxVerifyGasPerEntity`/`maxVerifyGasStakedEntity` when set, else the
+   * ERC-8421 constants (100,000 / 1,000,000).
+   */
+  get verifyGasBudgets(): VerifyGasBudgets {
+    const cfg = this.networkConfig as Partial<NetworkConfig> | undefined;
+    return {
+      perEntity:
+        cfg?.maxVerifyGasPerEntity != null
+          ? BigInt(cfg.maxVerifyGasPerEntity)
+          : DEFAULT_VERIFY_GAS_BUDGETS.perEntity,
+      stakedEntity:
+        cfg?.maxVerifyGasStakedEntity != null
+          ? BigInt(cfg.maxVerifyGasStakedEntity)
+          : DEFAULT_VERIFY_GAS_BUDGETS.stakedEntity,
+    };
+  }
+
+  /**
+   * [STAKING-010] for one [BUDGET-010] entity: the Staking Registry's deposit
+   * passes `ReputationService.checkStake` (stake >= `minStake`, delay >=
+   * `minUnstakeDelay`, no withdrawal initiated, not banned; a whitelisted
+   * entity also passes, as it does for every other stake-gated rule here),
+   * and the entity is not a default-code account.
+   *
+   * A failed code or registry read propagates (the transaction is rejected
+   * with that error, as it is when `resolveRoleStakes` cannot read the
+   * registry): a larger budget is never granted on a guess.
+   */
+  private async isStakedEntity(address: Hex): Promise<boolean> {
+    if (this.getCode) {
+      const code = await this.getCode(address);
+      if (code == null || code === "0x") return false;
+    }
+    const deposit = await this.stakingRegistryService.getDepositInfo(address);
+    const { code } = await this.reputationService.checkStake({
+      addr: address,
+      stake: deposit.stake,
+      unstakeDelaySec: deposit.unstakeDelaySec,
+      withdrawTime: deposit.withdrawTime,
+    });
+    return code === 0;
+  }
 
   /**
    * The message for a failure ethrex described in detail (`failedFrameIndex`
@@ -315,6 +370,23 @@ export class FrameTxValidationService {
       );
     }
     collector.pass(EXPLORER_RULES.STRUCTURE);
+
+    // ERC-8421 [BUDGET-010]: per-entity verification gas, staked entities
+    // get the larger budget. Acceptance Algorithm step 3 (resolve each
+    // entity's stake) - the Staking Registry is read only for an entity
+    // above the unstaked budget.
+    const budget = await checkVerifyGasBudgets(
+      computeEntityVerifyGas(tx, prefix),
+      (address) => this.isStakedEntity(address as Hex),
+      this.verifyGasBudgets
+    );
+    if (!budget.valid) {
+      throw collector.failed(
+        EXPLORER_RULES.BUDGET,
+        new RpcError(budget.reason, RpcErrorCodes.INVALID_USEROP)
+      );
+    }
+    collector.pass(EXPLORER_RULES.BUDGET, {}, budget.summary);
 
     // The validation prefix's last real frame index (recognizeValidationPrefix
     // already computes each role's real frameIndex, including the shift a

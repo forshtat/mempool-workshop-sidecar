@@ -30,6 +30,11 @@ const RULE_INFO: Record<string, RuleInfo> = {
     label: "Frame structure",
     explain: "The prefix follows EIP-8141's structural rules for targets, flags and verification gas.",
   },
+  "BUDGET-010": {
+    label: "Verification gas budget",
+    explain:
+      "Each entity's validation frames (plus, for the sender, the signature cost) stay within its ERC-8421 budget: 100,000 gas when unstaked, 1,000,000 when staked (node-configurable).",
+  },
   signature: {
     label: "Signatures",
     explain: "Every signature on the transaction verifies.",

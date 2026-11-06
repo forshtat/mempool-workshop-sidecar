@@ -224,52 +224,19 @@ describe("validateStructuralRules", () => {
     }
   });
 
-  it("rejects when the sum of limits.execution across the prefix exceeds MAX_VERIFY_GAS (item 6)", () => {
+  it("no longer applies EIP-8141's single combined MAX_VERIFY_GAS to limits.execution: that is ERC-8421 BUDGET-010, per entity (checkVerifyGasBudgets)", () => {
+    // [only_verify 150k, pay 60k]: 210k combined, over MAX_VERIFY_GAS - the
+    // structural rules leave execution gas to the per-entity budget check.
     const bigFrame: Frame = {
       ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
+      limits: { execution: MAX_VERIFY_GAS + 50_000n, state: 0n },
     };
-    const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
+    const payFrame: Frame = { ...verifyFrame(APPROVE_SCOPE.PAYMENT), target: PAYER, limits: { execution: 60_000n, state: 0n } };
     const frames = [bigFrame, payFrame];
     const tx = baseTx(frames);
     const prefix = recognizeValidationPrefix(frames, SENDER)!;
     expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
-    expect(result.valid).toBe(false);
-    if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
-    }
-  });
-
-  it("rejects when limits.execution is within budget alone but signature-verification cost pushes the total over MAX_VERIFY_GAS (item 6)", () => {
-    // A P256 signature costs 6700 gas (see SIGNATURE_VERIFICATION_GAS_COST).
-    // executionSum here is MAX_VERIFY_GAS - 1, comfortably under budget on
-    // its own - only adding the signature cost pushes it over.
-    const almostMaxFrame: Frame = {
-      ...verifyFrame(APPROVE_SCOPE.EXECUTION),
-      limits: { execution: MAX_VERIFY_GAS - 1n, state: 0n },
-    };
-    const payFrame = verifyFrame(APPROVE_SCOPE.PAYMENT);
-    const frames = [almostMaxFrame, payFrame];
-    const tx: FrameTransaction = {
-      ...baseTx(frames),
-      signatures: [
-        {
-          scheme: SIG_SCHEME.P256,
-          signer: "0x2222222222222222222222222222222222222222",
-          msg: "0x",
-          signature: "0x",
-        } as SignatureEntry,
-      ],
-    };
-    const prefix = recognizeValidationPrefix(frames, SENDER)!;
-    expect(prefix).not.toBeNull();
-    const result = validateStructuralRules(tx, prefix);
-    expect(result.valid).toBe(false);
-    if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
-      expect(result.reason).toMatch(/signature-verification cost 6700/);
-    }
+    expect(validateStructuralRules(tx, prefix).valid).toBe(true);
   });
 
   it("accepts when limits.execution plus signature-verification cost together stay within MAX_VERIFY_GAS", () => {
@@ -349,23 +316,6 @@ describe("validateStructuralRules", () => {
     if (!result.valid) {
       expect(result.reason).toMatch(/ATOMIC_BATCH_FLAG/);
       expect(result.reason).toMatch(/frame 0/);
-    }
-  });
-
-  it("rejects when a leading expiry_verify frame's oversized limits.execution pushes the prefix sum over MAX_VERIFY_GAS (item 6)", () => {
-    const expiryFrame: Frame = {
-      ...verifyFrame(APPROVE_SCOPE.NONE),
-      limits: { execution: MAX_VERIFY_GAS + 1n, state: 0n },
-    };
-    const frames = [expiryFrame, verifyFrame(APPROVE_SCOPE.EXECUTION_AND_PAYMENT)];
-    const tx = baseTx(frames);
-    const prefix = recognizeValidationPrefix(frames, SENDER)!;
-    expect(prefix).not.toBeNull();
-    expect(prefix.frames.some((f) => f.frameIndex === 0)).toBe(false);
-    const result = validateStructuralRules(tx, prefix);
-    expect(result.valid).toBe(false);
-    if (!result.valid) {
-      expect(result.reason).toMatch(/MAX_VERIFY_GAS/);
     }
   });
 

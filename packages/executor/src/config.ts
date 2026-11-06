@@ -238,6 +238,34 @@ export class Config {
       )
     );
 
+    config.maxVerifyGasPerEntity = Number(
+      fromEnvVar(
+        "MAX_VERIFY_GAS_PER_ENTITY",
+        config.maxVerifyGasPerEntity ??
+          bundlerDefaultConfigs.maxVerifyGasPerEntity
+      )
+    );
+    config.maxVerifyGasStakedEntity = Number(
+      fromEnvVar(
+        "MAX_VERIFY_GAS_STAKED_ENTITY",
+        config.maxVerifyGasStakedEntity ??
+          bundlerDefaultConfigs.maxVerifyGasStakedEntity
+      )
+    );
+    for (const [key, value] of [
+      ["maxVerifyGasPerEntity", config.maxVerifyGasPerEntity],
+      ["maxVerifyGasStakedEntity", config.maxVerifyGasStakedEntity],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`Invalid config: ${key} must be a positive integer, got ${value}`);
+      }
+    }
+    if (config.maxVerifyGasStakedEntity < config.maxVerifyGasPerEntity) {
+      throw new Error(
+        "Invalid config: maxVerifyGasStakedEntity must be >= maxVerifyGasPerEntity"
+      );
+    }
+
     config.stakingRegistryAddress = fromEnvVar(
       "STAKING_REGISTRY_ADDRESS",
       config.stakingRegistryAddress || bundlerDefaultConfigs.stakingRegistryAddress
@@ -603,6 +631,9 @@ const bundlerDefaultConfigs: BundlerConfig = {
   banSlack: 50,
   minStake: parseEther("0.01"),
   minUnstakeDelay: 0,
+  // ERC-8421 §Constants MAX_VERIFY_GAS_PER_ENTITY / MAX_VERIFY_GAS_STAKED_ENTITY
+  maxVerifyGasPerEntity: 100_000,
+  maxVerifyGasStakedEntity: 1_000_000,
   stakingRegistryAddress: AddressZero,
   minSignerBalance: parseEther("0.1"),
   multicall: "0xcA11bde05977b3631167028862bE2a173976CA11", // default multicall address

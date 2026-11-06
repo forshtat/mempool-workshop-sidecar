@@ -62,6 +62,21 @@ export type GetConfigResponse = {
   minSignerBalance: string;
   minStake: string;
   minUnstakeDelay: number;
+  /**
+   * ERC-8421 [BUDGET-010] verification gas budgets this node enforces, per
+   * entity: `maxVerifyGasPerEntity` for an unstaked (or default-code) entity,
+   * `maxVerifyGasStakedEntity` for a staked one (stake >= `minStake`, delay
+   * >= `minUnstakeDelay`, no withdrawal). The intrinsic signature cost counts
+   * toward `tx.sender`. `maxVerifyStateGas` is the separate prefix-wide
+   * state-gas cap (EIP-8141).
+   */
+  budgets: {
+    rule: "BUDGET-010";
+    maxVerifyGasPerEntity: number;
+    maxVerifyGasStakedEntity: number;
+    signatureCostAttributedTo: "sender";
+    maxVerifyStateGas: number;
+  };
   multicall: string;
   estimationStaticBuffer: number;
   validationGasLimit: number;

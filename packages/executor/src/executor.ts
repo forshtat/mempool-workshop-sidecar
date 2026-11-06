@@ -148,7 +148,8 @@ export class Executor {
       this.reputationService,
       this.networkConfig,
       this.logger,
-      (address) => this.publicClient.getBalance({ address })
+      (address) => this.publicClient.getBalance({ address }),
+      (address) => this.publicClient.getCode({ address })
     );
 
     this.frameTxSimulationService = new FrameTxSimulationService(

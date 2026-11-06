@@ -39,8 +39,9 @@ import { FRAME_MODE, APPROVE_SCOPE, SIG_SCHEME, FrameTransaction } from "@skandh
  * 2. A transaction that is fully ERC-7562-clean (the same unconditional-
  *    APPROVE wallet/paymaster contracts the real-inclusion e2e test already
  *    proved work end-to-end) but whose validation-prefix declares more
- *    `limits.execution` than EIP-8141's own `MAX_VERIFY_GAS` (100_000)
- *    mempool-policy cap allows. `MAX_VERIFY_GAS` is a "Public Mempool"
+ *    `limits.execution` for its unstaked sender than ERC-8421 [BUDGET-010]'s
+ *    `MAX_VERIFY_GAS_PER_ENTITY` (100_000) allows (EIP-8141's combined
+ *    `MAX_VERIFY_GAS` is the same figure for the public mempool). It is a
  *    admission heuristic (EIP-8141 §Constants: "Maximum amount of gas a
  *    node SHOULD expend validating..."), not a protocol/consensus validity
  *    rule ethrex itself enforces - ethrex would mine this transaction fine.
@@ -136,7 +137,7 @@ describe("frame tx e2e: admission-time rejection", () => {
   );
 
   it(
-    "rejects an ERC-7562-clean frame transaction that exceeds EIP-8141's own MAX_VERIFY_GAS",
+    "rejects an ERC-7562-clean frame transaction whose unstaked sender exceeds ERC-8421's MAX_VERIFY_GAS_PER_ENTITY (BUDGET-010)",
     async () => {
       // Canonical Paymaster shape [only_verify, pay] - both frames are the
       // same unconditional-APPROVE contracts the real-inclusion e2e test
@@ -155,7 +156,7 @@ describe("frame tx e2e: admission-time rejection", () => {
             mode: FRAME_MODE.VERIFY,
             flags: APPROVE_SCOPE.EXECUTION,
             target: null,
-            limits: { execution: 60_000n, state: 0n }, // + pay's 60_000 = 120_000 > MAX_VERIFY_GAS
+            limits: { execution: 150_000n, state: 0n }, // + 100 (ARBITRARY sig) > MAX_VERIFY_GAS_PER_ENTITY; the sender is unstaked
             value: 0n,
             data: "0x",
           },
@@ -189,9 +190,9 @@ describe("frame tx e2e: admission-time rejection", () => {
       const sent = await rpc(urlA, "eth_sendFrameTransaction", [toWire(tx)]);
       expect(
         sent.error,
-        `expected rejection for exceeding MAX_VERIFY_GAS, got: ${JSON.stringify(sent)}\n--- node A log ---\n${tailLog(dirA, "nodeA")}`
+        `expected rejection for exceeding MAX_VERIFY_GAS_PER_ENTITY, got: ${JSON.stringify(sent)}\n--- node A log ---\n${tailLog(dirA, "nodeA")}`
       ).toBeDefined();
-      expect(sent.error!.message).toMatch(/exceeds MAX_VERIFY_GAS/);
+      expect(sent.error!.message).toMatch(/BUDGET-010: .* exceeds MAX_VERIFY_GAS_PER_ENTITY 100000 for an unstaked entity/);
     },
     120_000
   );

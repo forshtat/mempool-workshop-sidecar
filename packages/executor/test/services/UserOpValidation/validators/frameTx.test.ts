@@ -1216,3 +1216,79 @@ describe("FrameTxValidationService: ethrex's structured failure detail", () => {
     expect(await message({ canonicalMempoolViolation: "BannedOpcode(66)" })).toBe("banned opcode: TIMESTAMP (0x42)");
   });
 });
+
+describe("FrameTxValidationService: ERC-8421 BUDGET-010 per-entity budgets", () => {
+  const selfVerifyWith = (execution: bigint): Frame => ({ ...selfVerifyFrame(), limits: { execution, state: 0n } });
+  const make = (opts: {
+    staked?: `0x${string}`;
+    config?: Record<string, unknown>;
+    getCode?: (a: `0x${string}`) => Promise<`0x${string}` | undefined>;
+  } = {}) =>
+    new FrameTxValidationService(
+      fakeStakingRegistry(opts.staked),
+      fakeReputationService(opts.staked),
+      { ...fakeNetworkConfig(), ...(opts.config ?? {}) } as NetworkConfig,
+      fakeLogger(),
+      undefined,
+      opts.getCode
+    );
+  const run = (svc: FrameTxValidationService, execution: bigint, collector = new CheckCollector()) =>
+    svc.validate(baseTx([selfVerifyWith(execution)]), fakeEthrexResult([ethrexFrame({ from: ENTRY_POINT, to: SENDER })]), collector);
+
+  it("rejects an unstaked sender's 150k VERIFY under rule BUDGET-010, before simulation results are consulted", async () => {
+    const collector = new CheckCollector();
+    await expect(run(make(), 150_000n, collector)).rejects.toThrow(
+      /BUDGET-010: sender\+payer 0x1111111111111111111111111111111111111111 verification gas 150000 .* exceeds MAX_VERIFY_GAS_PER_ENTITY 100000 for an unstaked entity/
+    );
+    const checks = collector.toChecks();
+    expect(checks.find((c) => c.rule === "BUDGET-010")).toMatchObject({ verdict: "fail" });
+    expect(checks.find((c) => c.rule === "simulation")).toMatchObject({ verdict: "skipped" });
+  });
+
+  it("admits the same 150k VERIFY once the entity is staked, and records the budget used", async () => {
+    const collector = new CheckCollector();
+    await expect(run(make({ staked: SENDER }), 150_000n, collector)).resolves.toMatchObject({
+      mempoolMembership: { [STANDARD_MEMPOOL_ID]: true },
+    });
+    expect(collector.toChecks().find((c) => c.rule === "BUDGET-010")).toMatchObject({
+      verdict: "pass",
+      detail: "sender+payer 150000/1000000 (staked)",
+    });
+  });
+
+  it("rejects a 1.1M VERIFY even when staked", async () => {
+    await expect(run(make({ staked: SENDER }), 1_100_000n)).rejects.toThrow(/exceeds MAX_VERIFY_GAS_STAKED_ENTITY 1000000/);
+  });
+
+  it("adds no staking-registry lookup for a prefix within the unstaked budget (only the existing per-entity compliance lookup runs)", async () => {
+    const within = fakeStakingRegistry();
+    await run(new FrameTxValidationService(within, fakeReputationService(), fakeNetworkConfig(), fakeLogger()), 90_000n);
+    expect(within.getDepositInfo).toHaveBeenCalledTimes(1);
+    const over = fakeStakingRegistry(SENDER);
+    await run(new FrameTxValidationService(over, fakeReputationService(SENDER), fakeNetworkConfig(), fakeLogger()), 150_000n);
+    expect(over.getDepositInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it("never treats a default-code entity (empty code) as staked, whatever the registry says", async () => {
+    await expect(run(make({ staked: SENDER, getCode: async () => "0x" }), 150_000n)).rejects.toThrow(/unstaked entity/);
+    await expect(run(make({ staked: SENDER, getCode: async () => "0x6000" }), 150_000n)).resolves.toBeDefined();
+  });
+
+  it("fails closed when the entity's code cannot be read: the error propagates, the larger budget is not granted", async () => {
+    const svc = make({ staked: SENDER, getCode: async () => { throw new Error("rpc down"); } });
+    await expect(run(svc, 150_000n)).rejects.toThrow(/rpc down/);
+    // within the unstaked budget nothing is read, so the same node still admits a 90k VERIFY
+    await expect(run(svc, 90_000n)).resolves.toBeDefined();
+  });
+
+  it("uses NetworkConfig.maxVerifyGasPerEntity / maxVerifyGasStakedEntity when set", async () => {
+    const svc = make({ config: { maxVerifyGasPerEntity: 250_000, maxVerifyGasStakedEntity: 2_500_000 } });
+    expect(svc.verifyGasBudgets).toEqual({ perEntity: 250_000n, stakedEntity: 2_500_000n });
+    await expect(run(svc, 150_000n)).resolves.toBeDefined();
+    await expect(run(svc, 300_000n)).rejects.toThrow(/MAX_VERIFY_GAS_PER_ENTITY 250000/);
+  });
+
+  it("defaults to the ERC-8421 constants when NetworkConfig has no budgets", () => {
+    expect(make().verifyGasBudgets).toEqual({ perEntity: 100_000n, stakedEntity: 1_000_000n });
+  });
+});

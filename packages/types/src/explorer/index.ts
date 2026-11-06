@@ -19,6 +19,8 @@ export const EXPLORER_RULES = {
   RECENT_ROOT: "recent-root",
   PREFIX: "prefix",
   STRUCTURE: "structure",
+  /** ERC-8421 [BUDGET-010]: per-entity verification gas (staked entities get the larger budget). */
+  BUDGET: "BUDGET-010",
   SIGNATURE: "signature",
   SIMULATION: "simulation",
   TRACE_ALIGNMENT: "trace-alignment",
@@ -44,6 +46,7 @@ export const GLOBAL_RULE_ORDER: readonly ExplorerRuleId[] = [
   EXPLORER_RULES.RECENT_ROOT,
   EXPLORER_RULES.PREFIX,
   EXPLORER_RULES.STRUCTURE,
+  EXPLORER_RULES.BUDGET,
   EXPLORER_RULES.SIGNATURE,
   EXPLORER_RULES.SIMULATION,
   EXPLORER_RULES.TRACE_ALIGNMENT,

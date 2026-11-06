@@ -94,6 +94,13 @@ export interface NetworkConfig {
   // zero stake for every entity without a chain call. See
   // docs/superpowers/specs/2026-09-30-naive-staking-registry-design.md.
   stakingRegistryAddress: Hex;
+  // ERC-8421 [BUDGET-010] per-entity verification gas budgets (execution
+  // gas summed over an entity's validation frames, plus the signature cost
+  // for tx.sender). Defaults: MAX_VERIFY_GAS_PER_ENTITY = 100000 for an
+  // unstaked entity, MAX_VERIFY_GAS_STAKED_ENTITY = 1000000 for a staked one.
+  // Env: SKANDHA_MAX_VERIFY_GAS_PER_ENTITY, SKANDHA_MAX_VERIFY_GAS_STAKED_ENTITY.
+  maxVerifyGasPerEntity: number;
+  maxVerifyGasStakedEntity: number;
   multicall: string;
   // adds certain amount of gas to callGasLimit
   // 21000 by default

@@ -160,3 +160,19 @@ describe("Skandha (getFeeHistory removed)", () => {
     expect((skandha as any).getFeeHistory).toBeUndefined();
   });
 });
+
+describe("Skandha.getConfig budgets (skandha_config)", () => {
+  it("advertises the BUDGET-010 per-entity budgets the node enforces", async () => {
+    const skandha = buildSkandha({
+      networkConfig: { minStake: 10n ** 16n, minUnstakeDelay: 0, minSignerBalance: 0n, blockscoutApiKeys: [], maxVerifyGasPerEntity: 100_000, maxVerifyGasStakedEntity: 1_000_000 },
+    });
+    const cfg = await skandha.getConfig();
+    expect(cfg.budgets).toEqual({
+      rule: "BUDGET-010",
+      maxVerifyGasPerEntity: 100_000,
+      maxVerifyGasStakedEntity: 1_000_000,
+      signatureCostAttributedTo: "sender",
+      maxVerifyStateGas: 500_000,
+    });
+  });
+});
