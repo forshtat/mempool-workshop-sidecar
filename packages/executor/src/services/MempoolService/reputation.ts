@@ -1,14 +1,16 @@
 import RpcError from "@skandha/types/lib/api/errors/rpc-error";
-import { IWhitelistedEntities, ReputationStatus } from "@skandha/types/lib/executor";
+import { ReputationStatus } from "@skandha/types/lib/executor";
 import * as RpcErrorCodes from "@skandha/types/lib/api/errors/rpc-error-codes.js";
 import { getAddress } from "viem";
 import { isKeyedNonce } from "@skandha/types/lib/contracts/FrameTx.js";
 import { FrameTxMempoolEntry as MempoolEntry } from "../../entities/FrameTxMempoolEntry.js";
 import { KnownEntities, NetworkConfig, StakeInfo } from "../../interfaces.js";
 import { ReputationService } from "../ReputationService.js";
+import { isWhitelistedAs } from "../../utils/whitelist.js";
 import { MempoolService } from "./service.js";
 import {
   MAX_MEMPOOL_USEROPS_PER_SENDER,
+  MAX_PENDING_PER_UNSTAKED_SENDER,
   THROTTLED_ENTITY_MEMPOOL_COUNT,
 } from "./constants.js";
 
@@ -22,6 +24,7 @@ import {
 // validation-prefix-derived `sender`/`factory`/`payer` fields. There is no
 // `aggregator` concept under EIP-8141.
 type EntityTitle = "sender" | "factory" | "payer";
+const TITLES: EntityTitle[] = ["sender", "factory", "payer"];
 
 export class MempoolReputationChecks {
   constructor(
@@ -52,7 +55,7 @@ export class MempoolReputationChecks {
     payerInfo: StakeInfo | undefined
   ): Promise<void> {
     const mEntries = await this.service.fetchPendingUserOps();
-    const titles: EntityTitle[] = ["sender", "factory", "payer"];
+    const titles = TITLES;
     const count = [1, 1, 1]; // starting all values from one because `entry` param counts as well
     // What the per-entity cap is checked against: `count` minus every keyed
     // entry in which the entity is that entry's own sender (see `exempt`).
@@ -90,6 +93,8 @@ export class MempoolReputationChecks {
     // "payer"/"factory" bucket that is the sender itself. Linear txs keep the
     // cap, counted among linear txs only. A third-party payer/factory is
     // capped as before, keyed or not; ban/throttle status still applies.
+    // Keyed txs still count toward the sender-wide cap
+    // (`checkSenderPendingCap`).
     const exempt = (stake: StakeInfo): boolean =>
       isKeyedNonce(entry.tx) &&
       getAddress(stake.addr) === getAddress(entry.sender);
@@ -97,17 +102,11 @@ export class MempoolReputationChecks {
     // check for ban
     for (const [index, stake] of stakes.entries()) {
       if (!stake) continue;
-      const whitelist =
-        this.networkConfig.whitelistedEntities[
-          titles[index] as keyof IWhitelistedEntities
-        ];
       if (
         stake.addr &&
-        whitelist != null &&
-        // eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
-        whitelist.some(
-          (addr: string) => getAddress(addr) === getAddress(stake.addr)
-        )
+        isWhitelistedAs(this.networkConfig.whitelistedEntities, stake.addr, [
+          titles[index]!,
+        ])
       ) {
         continue;
       }
@@ -141,6 +140,51 @@ export class MempoolReputationChecks {
           throw new RpcError(checkStake.msg, checkStake.code);
         }
       }
+    }
+    await this.checkSenderPendingCap(entry, mEntries, stakes);
+  }
+
+  /**
+   * ERC-8421 LIFECYCLE-030: an unstaked sender may have at most
+   * MAX_PENDING_PER_UNSTAKED_SENDER pending transactions, keyed or not; a
+   * staked one has no sender-wide cap. `exempt` lifts only the small
+   * per-sender cap for keyed txs, so without this a self-paying sender could
+   * keep any number of keyed txs pending. The sender's stake is the
+   * `StakeInfo` of whichever role resolved to its address (the payer, for
+   * Self Relay); with none, it counts as unstaked. A sender whitelisted in
+   * the config for a role it holds in this transaction (`account` as the
+   * sender, `paymaster` when it pays for itself) is not capped, as validation
+   * and the checks above waive that role; `checkStake` also passes the admin
+   * whitelist.
+   */
+  private async checkSenderPendingCap(
+    entry: MempoolEntry,
+    pending: MempoolEntry[],
+    stakes: (StakeInfo | undefined)[]
+  ): Promise<void> {
+    const sender = getAddress(entry.sender);
+    const already = pending.filter(
+      (m) => getAddress(m.sender) === sender
+    ).length;
+    if (already < MAX_PENDING_PER_UNSTAKED_SENDER) return;
+    const held = stakes.map(
+      (s) => s !== undefined && Boolean(s.addr) && getAddress(s.addr) === sender
+    );
+    const roles = TITLES.filter((_, i) => held[i]);
+    const whitelisted = this.networkConfig.whitelistedEntities;
+    if (isWhitelistedAs(whitelisted, sender, roles)) return;
+    const stake = stakes[held.indexOf(true)] ?? {
+      addr: entry.sender,
+      stake: 0,
+      unstakeDelaySec: 0,
+      withdrawTime: 0,
+    };
+    const { code, msg } = await this.reputationService.checkStake(stake);
+    if (code !== 0) {
+      throw new RpcError(
+        `sender ${entry.sender} has ${already} pending transactions; a sender that is not staked may have at most ${MAX_PENDING_PER_UNSTAKED_SENDER} (${msg})`,
+        code
+      );
     }
   }
 
