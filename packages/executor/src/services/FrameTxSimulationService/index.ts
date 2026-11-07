@@ -147,6 +147,22 @@ export class FrameTxSimulationService {
       );
     }
 
+    // Reject a predicted revert that a third party would pay for. A tx whose
+    // own simulation reverts is a guaranteed failure: when the payer is not
+    // the sender, a (possibly staked) payer would fund it for nothing. A
+    // self-paid revert only costs the sender, so it is still admitted.
+    if (
+      result.executionStatus === "reverted" &&
+      result.payer != null &&
+      result.payer.toLowerCase() !== tx.sender.toLowerCase()
+    ) {
+      const failedFrame = result.frames.findIndex((frame) => !frame.succeeded);
+      throw new RpcError(
+        `simulation predicts revert at frame ${failedFrame} and payer ${result.payer} is not the sender`,
+        RpcErrorCodes.VALIDATION_FAILED
+      );
+    }
+
     const simulation: FrameTxSimulationResult = {
       cumulativeGasUsed: result.gasUsed,
       payer: result.payer,

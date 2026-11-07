@@ -195,6 +195,55 @@ describe("FrameTxSimulationService.simulate", () => {
     expect(publicClient.request).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a predicted revert when the payer is not the sender, naming the failing frame", async () => {
+    const root = {
+      from: ENTRY_POINT,
+      to: SENDER,
+      type: "CALL",
+      accessedSlots: emptyAccessedSlots(),
+      extCodeAccessInfo: [],
+      usedOpcodes: {},
+      contractSize: {},
+      outOfGas: false,
+    };
+    const ethrexResult = {
+      canonicalMempoolValid: true,
+      prefixShape: "SelfVerify",
+      payer: PAYER,
+      maxCost: "0x0",
+      canonicalMempoolViolation: null,
+      gasUsed: "0x100",
+      frames: [
+        { gasUsed: "0x40", succeeded: true },
+        { gasUsed: "0x60", succeeded: false },
+      ],
+      executionStatus: "reverted",
+      executionError: null,
+      erc7562Trace: [
+        { frameIndex: 0, root },
+        { frameIndex: 1, root: { ...root, to: PAYER } },
+      ],
+      erc7562TraceError: null,
+    };
+    const frameTxValidationService = new FrameTxValidationService(
+      fakeStakingRegistry(),
+      fakeReputationService(),
+      fakeNetworkConfig(),
+      fakeLogger()
+    );
+    const service = new FrameTxSimulationService(
+      fakePublicClient(ethrexResult),
+      frameTxValidationService,
+      fakeLogger()
+    );
+    const tx = baseTx([onlyVerifyFrame(), payFrame(PAYER)]);
+
+    await expect(service.simulate(tx)).rejects.toMatchObject({
+      code: RpcErrorCodes.VALIDATION_FAILED,
+      message: expect.stringContaining("revert at frame 1"),
+    });
+  });
+
   it("fails closed with an RpcError carrying ethrex's violation reason when no trace/gas data was produced", async () => {
     const invalidResult = {
       canonicalMempoolValid: false,
