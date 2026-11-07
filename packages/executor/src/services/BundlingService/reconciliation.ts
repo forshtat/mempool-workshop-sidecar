@@ -1,4 +1,4 @@
-import { Hex, PublicClient } from "viem";
+import { Hex, PublicClient, toHex } from "viem";
 import { Logger } from "@skandha/types/lib/index.js";
 import { PerChainMetrics } from "@skandha/monitoring/lib/index.js";
 import { MempoolEntryStatus } from "@skandha/types/lib/executor";
@@ -13,6 +13,13 @@ import { getHeadSlot } from "../../utils/headSlot.js";
 import { ReceiptService } from "../ReceiptService/index.js";
 import { FrameTxSimulationService } from "../FrameTxSimulationService/index.js";
 import { FrameTxReceipt } from "@skandha/types/lib/executor/validation/frameTxReceipt.js";
+import {
+  AccountAccess,
+  BlockChanges,
+  SlotReads,
+  collectChanges,
+  isAffected,
+} from "./blockChanges.js";
 
 /**
  * Runs once per newly observed block, driven from `BundlingService`'s
@@ -44,6 +51,12 @@ import { FrameTxReceipt } from "@skandha/types/lib/executor/validation/frameTxRe
 /** Most `New` entries whose receipt is looked up in one reconciliation pass. */
 const MAX_INCLUSION_LOOKUPS_PER_PASS = 50;
 
+/** Most blocks whose access lists one pass reads; past this it revalidates every entry. */
+const MAX_ACCESS_LISTS_PER_PASS = BigInt(8);
+
+/** Most `New` entries revalidated in one pass; the rest stay due for the next passes. */
+const MAX_REVALIDATIONS_PER_PASS = 50;
+
 export class MempoolReconciler {
   private lastReconciledBlock = BigInt(-1);
 
@@ -64,21 +77,42 @@ export class MempoolReconciler {
   /**
    * Per-entry aggregated storage-slot access (`FrameTxValidationResult.
    * accessedSlots`), cached in memory only - keyed by the same slot key
-   * `MempoolService` derives its DB key from (`frameTxSlotKey`). NOT persisted: it's cheap to recompute by re-running
-   * `validate()`, nothing consumes it yet, and `Set`-valued fields don't fit
-   * the existing DB-entry JSON codec without unused work.
+   * `MempoolService` derives its DB key from (`frameTxSlotKey`), with the
+   * hash of the transaction that read them: a replacement shares the key, not
+   * the reads. NOT persisted: an entry without reads for its current hash is
+   * simply revalidated, which records them again.
    *
-   * Unused today beyond being populated - `reconcileNew` revalidates every
-   * `New` entry every block (see `selectCandidatesForRevalidation`). It
-   * exists so a later change can intersect this against a newly mined
-   * block's `eth_getBlockAccessList` diff (ethrex already implements
-   * EIP-7928 and exposes this RPC method - confirmed against
-   * `crates/networking/rpc/eth/block_access_list.rs` on ethrex's
-   * `eip8141-tracer` branch, not a hypothetical future API) to narrow
-   * "revalidate everyone" down to "revalidate only entries whose recorded
-   * reads/writes actually overlap what this block touched."
+   * `selectCandidatesForRevalidation` intersects it with the EIP-7928 block
+   * access lists (`eth_getBlockAccessList`) of the blocks since the last
+   * narrowing, so only entries whose recorded reads overlap what those blocks
+   * wrote are revalidated.
    */
-  private accessedSlotsCache = new Map<string, { [address: string]: Set<string> }>();
+  private accessedSlotsCache = new Map<
+    string,
+    { txHash?: string; reads: SlotReads }
+  >();
+
+  /**
+   * The block (and its hash) up to which block changes were last turned into
+   * due entries. Separate from `lastReconciledBlock`, which advances before a
+   * pass runs: a pass that throws earlier leaves this behind, so the next
+   * pass reads every block since, and a hash that is no longer the parent of
+   * the next block (a reorg) makes the next pass revalidate every entry.
+   */
+  private lastNarrowedBlock = BigInt(-1);
+
+  private lastNarrowedHash: Hex | undefined;
+
+  private passRunning = false;
+
+  /**
+   * Keys of `New` entries that block changes can have invalidated and that
+   * have not been revalidated since, in the order they became due. A key
+   * leaves only once its entry has been revalidated (or it leaves the pool),
+   * so neither MAX_REVALIDATIONS_PER_PASS nor a pass that throws part-way can
+   * make a later block that touches nothing the entry read skip it.
+   */
+  private dueForRevalidation = new Set<string>();
 
   constructor(
     private mempoolService: MempoolService,
@@ -90,7 +124,23 @@ export class MempoolReconciler {
     private logger: Logger
   ) {}
 
+  /**
+   * One pass at a time: the cron fires on an interval whether or not the last
+   * pass finished, and two passes sharing `dueForRevalidation` could drop an
+   * entry's due flag. A skipped tick loses nothing, since the next pass reads
+   * every block since the last narrowing.
+   */
   async reconcile(): Promise<void> {
+    if (this.passRunning) return;
+    this.passRunning = true;
+    try {
+      await this.reconcileOnce();
+    } finally {
+      this.passRunning = false;
+    }
+  }
+
+  private async reconcileOnce(): Promise<void> {
     const blockNumber = await this.publicClient.getBlockNumber();
     if (blockNumber <= this.lastReconciledBlock) {
       return;
@@ -108,7 +158,9 @@ export class MempoolReconciler {
     await this.reconcileSubmitted(submitted);
     const notOnChain = await this.reconcileMinedElsewhere(newEntries);
     const rootsUsable = await this.reconcileRecentRoots(notOnChain);
-    await this.reconcileNew(this.selectCandidatesForRevalidation(rootsUsable));
+    await this.reconcileNew(
+      await this.selectCandidatesForRevalidation(rootsUsable, newEntries)
+    );
     await this.mempoolService.enforceBalances(blockNumber);
     await this.reconcileWatchList();
   }
@@ -423,60 +475,235 @@ export class MempoolReconciler {
   private async reconcileNew(entries: FrameTxMempoolEntry[]): Promise<void> {
     const chainId = await this.getChainId();
     for (const entry of entries) {
-      if (chainId !== undefined && entry.tx.chainId !== chainId) {
-        await this.mempoolService.updateStatus(
-          [entry],
-          MempoolEntryStatus.Cancelled,
-          {
-            revertReason: `frame transaction chain id ${entry.tx.chainId} does not match this node's chain id ${chainId}`,
-          }
-        );
-        continue;
-      }
-      try {
-        const { validation } = await this.frameTxSimulationService.simulate(
-          entry.tx
-        );
-        if (!validation.mempoolMembership[this.networkConfig.standardMempoolId]) {
-          await this.mempoolService.updateStatus(
-            [entry],
-            MempoolEntryStatus.Cancelled,
-            {
-              revertReason: `no longer compliant with mempool ${this.networkConfig.standardMempoolId} as of block ${this.lastReconciledBlock}`,
-            }
-          );
-          continue;
+      await this.revalidate(entry, chainId);
+      this.dueForRevalidation.delete(this.entryKey(entry));
+    }
+  }
+
+  private async revalidate(
+    entry: FrameTxMempoolEntry,
+    chainId: bigint | undefined
+  ): Promise<void> {
+    if (chainId !== undefined && entry.tx.chainId !== chainId) {
+      await this.mempoolService.updateStatus(
+        [entry],
+        MempoolEntryStatus.Cancelled,
+        {
+          revertReason: `frame transaction chain id ${entry.tx.chainId} does not match this node's chain id ${chainId}`,
         }
-        this.accessedSlotsCache.set(this.entryKey(entry), validation.accessedSlots);
-      } catch (err) {
+      );
+      return;
+    }
+    try {
+      const { validation } = await this.frameTxSimulationService.simulate(
+        entry.tx
+      );
+      const mempoolId = this.networkConfig.standardMempoolId;
+      if (!validation.mempoolMembership[mempoolId]) {
         await this.mempoolService.updateStatus(
           [entry],
           MempoolEntryStatus.Cancelled,
           {
-            revertReason: `revalidation failed as of block ${this.lastReconciledBlock}: ${
-              (err as Error).message
-            }`,
+            revertReason: `no longer compliant with mempool ${mempoolId} as of block ${this.lastReconciledBlock}`,
           }
         );
+        return;
       }
+      this.accessedSlotsCache.set(this.entryKey(entry), {
+        txHash: entry.txHash,
+        reads: validation.accessedSlots,
+      });
+    } catch (err) {
+      await this.mempoolService.updateStatus(
+        [entry],
+        MempoolEntryStatus.Cancelled,
+        {
+          revertReason: `revalidation failed as of block ${
+            this.lastReconciledBlock
+          }: ${(err as Error).message}`,
+        }
+      );
     }
   }
 
   /**
-   * Which `New` entries need revalidation this pass. Returns all of them
-   * today - a full sweep. The seam for the future BAL-narrowing optimization
-   * described on `accessedSlotsCache`: this method's body becomes "fetch
-   * `eth_getBlockAccessList` for `lastReconciledBlock`, keep only entries
-   * whose cached `accessedSlots` intersects it," with no change needed at
-   * the call site in `reconcile()`.
+   * Which `New` entries to revalidate this pass. Revalidating every entry
+   * every block let one sender's pending entries cost the node a simulation
+   * each, per block, whether or not anything they read had changed. Now an
+   * entry becomes due when the blocks since the last narrowing can have
+   * invalidated it (`affectedEntries`), and at most MAX_REVALIDATIONS_PER_PASS
+   * due entries are revalidated per pass, longest due first; entries that
+   * became due together queue by priority fee, then age. One revalidated
+   * rejoins the back of the queue when it is due again, so an entry due every
+   * pass cannot hold the budget: every due entry is revalidated within
+   * ceil(due / MAX_REVALIDATIONS_PER_PASS) passes.
+   *
+   * Affected `pending` entries become due even when they are not
+   * `candidates` this pass (a receipt lookup failed, say), so a pass that
+   * skips one does not lose the changes it read past.
    */
-  private selectCandidatesForRevalidation(
-    entries: FrameTxMempoolEntry[]
-  ): FrameTxMempoolEntry[] {
-    return entries;
+  private async selectCandidatesForRevalidation(
+    candidates: FrameTxMempoolEntry[],
+    pending: FrameTxMempoolEntry[]
+  ): Promise<FrameTxMempoolEntry[]> {
+    const live = new Set(pending.map((entry) => this.entryKey(entry)));
+    for (const key of this.accessedSlotsCache.keys()) {
+      if (!live.has(key)) this.accessedSlotsCache.delete(key);
+    }
+    for (const key of this.dueForRevalidation) {
+      if (!live.has(key)) this.dueForRevalidation.delete(key);
+    }
+    const byKey = new Map(
+      candidates.map((entry) => [this.entryKey(entry), entry])
+    );
+    const head = await this.header(this.lastReconciledBlock);
+    const affected = await this.affectedEntries(pending, head);
+    for (const entry of [...affected].sort(byPriorityFeeThenAge)) {
+      this.dueForRevalidation.add(this.entryKey(entry));
+    }
+    this.lastNarrowedBlock = this.lastReconciledBlock;
+    this.lastNarrowedHash = head?.hash;
+
+    const picked: FrameTxMempoolEntry[] = [];
+    for (const key of this.dueForRevalidation) {
+      if (picked.length === MAX_REVALIDATIONS_PER_PASS) break;
+      const entry = byKey.get(key);
+      if (entry) picked.push(entry);
+    }
+    const waiting = this.dueForRevalidation.size - picked.length;
+    if (waiting > 0) {
+      this.logger.debug(
+        `Revalidating ${picked.length} entries; ${waiting} stay due`
+      );
+    }
+    return picked;
+  }
+
+  /**
+   * The entries the blocks since the last narrowing can have invalidated (see
+   * `isAffected`), plus those with no recorded reads for their current
+   * transaction. All of them when those blocks' changes are unknown (see
+   * `changesSinceLastNarrowing`), or when they touched the staking registry:
+   * validation reads stake through a separate call, outside the trace that
+   * records reads. Also those whose max fee is below the head's base fee,
+   * which revalidation cancels, as the full sweep did.
+   */
+  private async affectedEntries(
+    entries: FrameTxMempoolEntry[],
+    head: BlockHeader | undefined
+  ): Promise<FrameTxMempoolEntry[]> {
+    const changes = await this.changesSinceLastNarrowing(head);
+    if (!changes || this.touchesStakingRegistry(changes)) return entries;
+    const baseFee = head?.baseFeePerGas;
+    try {
+      return entries.filter(
+        (entry) =>
+          (baseFee !== undefined && entry.tx.fees.maxFeePerGas < baseFee) ||
+          isAffected(entry.tx, this.cachedReads(entry), changes)
+      );
+    } catch (err) {
+      this.logger.error(
+        err,
+        "Could not match block access lists; revalidating every entry"
+      );
+      return entries;
+    }
+  }
+
+  private cachedReads(entry: FrameTxMempoolEntry): SlotReads | undefined {
+    const cached = this.accessedSlotsCache.get(this.entryKey(entry));
+    return cached !== undefined && cached.txHash === entry.txHash
+      ? cached.reads
+      : undefined;
+  }
+
+  private touchesStakingRegistry(changes: BlockChanges): boolean {
+    const registry = this.networkConfig.stakingRegistryAddress?.toLowerCase();
+    if (registry === undefined || BigInt(registry) === BigInt(0)) return false;
+    return changes.accounts.has(registry) || changes.written.has(registry);
+  }
+
+  /**
+   * What the blocks after the last narrowed block, up to this pass's block,
+   * changed. `undefined` (unknown) on the first pass, after more than
+   * MAX_ACCESS_LISTS_PER_PASS blocks, when the chain no longer extends the
+   * last narrowed block (a reorg), or when a header or access list cannot be
+   * read.
+   */
+  private async changesSinceLastNarrowing(
+    head: BlockHeader | undefined
+  ): Promise<BlockChanges | undefined> {
+    const from = this.lastNarrowedBlock;
+    const last = this.lastReconciledBlock;
+    if (
+      from < BigInt(0) ||
+      last - from > MAX_ACCESS_LISTS_PER_PASS ||
+      this.lastNarrowedHash === undefined
+    ) {
+      return undefined;
+    }
+    const next =
+      last === from + BigInt(1) ? head : await this.header(from + BigInt(1));
+    if (next?.parentHash !== this.lastNarrowedHash) return undefined;
+    const lists: AccountAccess[][] = [];
+    for (let block = from + BigInt(1); block <= last; block++) {
+      const list = await this.publicClient
+        .request({
+          method: "eth_getBlockAccessList",
+          params: [toHex(block)],
+        } as never)
+        .catch((err: unknown) => {
+          this.logger.debug(
+            err,
+            `Could not read the access list of block ${block}; revalidating every entry`
+          );
+          return undefined;
+        });
+      if (!Array.isArray(list)) return undefined;
+      lists.push(list as AccountAccess[]);
+    }
+    try {
+      return collectChanges(lists);
+    } catch (err) {
+      this.logger.error(
+        err,
+        "Could not read block access lists; revalidating every entry"
+      );
+      return undefined;
+    }
+  }
+
+  private async header(blockNumber: bigint): Promise<BlockHeader | undefined> {
+    try {
+      const block = await this.publicClient.getBlock({ blockNumber });
+      return block.hash === null
+        ? undefined
+        : {
+            hash: block.hash,
+            parentHash: block.parentHash,
+            baseFeePerGas: block.baseFeePerGas ?? undefined,
+          };
+    } catch {
+      return undefined;
+    }
   }
 
   private entryKey(entry: FrameTxMempoolEntry): string {
     return frameTxSlotKey(entry.chainId, entry.tx);
   }
+}
+
+type BlockHeader = { hash: Hex; parentHash: Hex; baseFeePerGas?: bigint };
+
+function byPriorityFeeThenAge(
+  a: FrameTxMempoolEntry,
+  b: FrameTxMempoolEntry
+): number {
+  const feeA = a.tx.fees.maxPriorityFeePerGas;
+  const feeB = b.tx.fees.maxPriorityFeePerGas;
+  if (feeA !== feeB) return feeA > feeB ? -1 : 1;
+  return (
+    (a.submittedTime ?? a.lastUpdatedTime) -
+    (b.submittedTime ?? b.lastUpdatedTime)
+  );
 }
