@@ -12,7 +12,6 @@
  * is no EntryPoint contract call whose method signature to match against -
  * ERC-4337's EntryPoint-call-depth-based indexing has no equivalent here.
  */
-import { IWhitelistedEntities } from "@skandha/types/lib/executor/index.js";
 import RpcError from "@skandha/types/lib/api/errors/rpc-error.js";
 import * as RpcErrorCodes from "@skandha/types/lib/api/errors/rpc-error-codes.js";
 import { Logger } from "@skandha/types/lib/index.js";
@@ -54,6 +53,7 @@ import {
 } from "../utils.js";
 import { StakingRegistryService } from "../../StakingRegistryService/index.js";
 import { ReputationService } from "../../ReputationService.js";
+import { EntityRole, roleToWhitelistKey } from "../../../utils/whitelist.js";
 
 /**
  * Some opcodes like:
@@ -86,24 +86,7 @@ const bannedOpCodes = new Set([
   "BLOBBASEFEE",
 ]);
 
-export type EntityRole = "sender" | "payer" | "factory";
-
-/**
- * Maps a validation-prefix role to the `IWhitelistedEntities` key for the
- * analogous ERC-4337 concept:
- *  - "sender" (validates tx.sender's own authorization - either via a
- *    dedicated `only_verify` frame in the Canonical Paymaster shape, or
- *    folded into the `payer` frame itself in the Self Relay shape)
- *    corresponds to ERC-4337's "account".
- *  - "payer" (whoever's approval frame ends up paying gas - the sender
- *    itself when self-relaying) corresponds to ERC-4337's "paymaster".
- *  - "factory" is unchanged.
- */
-const roleToWhitelistKey: Record<EntityRole, keyof IWhitelistedEntities> = {
-  sender: "account",
-  payer: "paymaster",
-  factory: "factory",
-};
+export type { EntityRole } from "../../../utils/whitelist.js";
 
 /**
  * Per-mempool admission result, keyed by `mempoolId` (the same IPFS-hash-style

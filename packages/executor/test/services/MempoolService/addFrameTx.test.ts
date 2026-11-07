@@ -152,3 +152,53 @@ describe("MempoolService.validateFrameTxReplaceability", () => {
     await expect(build().validateFrameTxReplaceability(txWithFee(2n))).resolves.toBe(true);
   });
 });
+
+describe("MempoolService.addFrameTx - ERC-8421 sender-wide cap", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const self = { addr: SENDER, stake: 0n, unstakeDelaySec: 0, withdrawTime: 0 };
+  const keyed = (key: bigint, fee = 2n): FrameTransaction => ({ ...txWithFee(fee), nonceKeys: [key] });
+  const hashOf = (tx: FrameTransaction) => keccak256(encodeRawFrameTx(tx));
+  const build = () =>
+    new MempoolService(
+      memoryDb(),
+      1,
+      {
+        getStatus: vi.fn().mockResolvedValue(0),
+        fetchOne: vi.fn().mockResolvedValue({}),
+        calculateMaxAllowedMempoolOpsUnstaked: vi.fn().mockReturnValue(1000),
+        checkStake: vi.fn().mockResolvedValue({ code: -32505, msg: `${SENDER} is unstaked` }),
+        updateSeenStatus: vi.fn().mockResolvedValue(undefined),
+        updateIncludedStatus: vi.fn().mockResolvedValue(undefined),
+      } as any,
+      new ExecutorEventBus(),
+      { useropsTTL: 0, archiveDuration: 1, whitelistedEntities: {}, minStake: 1n, minUnstakeDelay: 0 } as any,
+      { debug: vi.fn(), error: vi.fn() } as any
+    );
+  const add = (pool: MempoolService, tx: FrameTransaction) =>
+    pool.addFrameTx(tx, hashOf(tx), undefined, undefined, undefined, self);
+  const fill = async (pool: MempoolService) => {
+    for (let key = 1n; key <= 64n; key++) await add(pool, keyed(key));
+  };
+
+  it("refuses resubmitting a cancelled tx while the sender is at the cap", async () => {
+    const pool = build();
+    await fill(pool);
+    const entry = await pool.getEntryByHash(hashOf(keyed(64n)));
+    await pool.updateStatus([entry!], MempoolEntryStatus.Cancelled, { revertReason: "test" });
+    await add(pool, keyed(65n));
+    await expect(add(pool, keyed(64n))).rejects.toThrow(/may have at most 64/);
+  });
+
+  it("still lets a pending tx be fee-bumped at the cap", async () => {
+    const pool = build();
+    await fill(pool);
+    vi.advanceTimersByTime(10); // useropsTTL is 0, so any later update may replace
+    const res = await add(pool, keyed(1n, 100n));
+    expect(res.replacedTxHash).toBe(hashOf(keyed(1n)));
+  });
+});

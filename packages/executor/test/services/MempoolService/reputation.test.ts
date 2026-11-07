@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MempoolReputationChecks } from "../../../src/services/MempoolService/reputation.js";
+import { ReputationService } from "../../../src/services/ReputationService.js";
+import { LocalDbController } from "../../mocks/database.js";
 
 const LINEAR = { nonceKeys: [0n] };
 const KEYED = (...keys: bigint[]) => ({ nonceKeys: keys });
@@ -294,5 +296,131 @@ describe("MempoolReputationChecks.checkEntityCountInMempool - EIP-8250 keyed non
     await expect(
       checks.checkEntityCountInMempool(selfRelay(KEYED(1n)) as any, undefined, undefined, stake(sender))
     ).rejects.toThrow(/banned/);
+  });
+});
+
+describe("MempoolReputationChecks.checkEntityCountInMempool - ERC-8421 sender-wide cap", () => {
+  const sender = "0x4444444444444444444444444444444444444444";
+  const thirdPartyPayer = "0x8888888888888888888888888888888888888888";
+  const stake = (addr: string) => ({ addr, stake: 0n, unstakeDelaySec: 0, withdrawTime: 0 });
+  const build = (pending: any[], staked = false, whitelistedEntities = {}) => {
+    const reputationService = {
+      getStatus: vi.fn().mockResolvedValue(0), // ReputationStatus.OK
+      fetchOne: vi.fn().mockResolvedValue({}),
+      calculateMaxAllowedMempoolOpsUnstaked: vi.fn().mockReturnValue(1000),
+      checkStake: vi.fn().mockResolvedValue(staked ? { code: 0, msg: "" } : { code: -32505, msg: "unstaked" }),
+    } as any;
+    const checks = new MempoolReputationChecks(
+      { fetchPendingUserOps: vi.fn().mockResolvedValue(pending) } as any,
+      reputationService,
+      { whitelistedEntities } as any
+    );
+    return { checks, reputationService };
+  };
+  const selfRelay = (tx: object) => ({ sender, payer: sender, factory: undefined, tx });
+  const keyedLanes = (n: number) => Array.from({ length: n }, (_, i) => selfRelay(KEYED(BigInt(i + 1))));
+  const add = (checks: MempoolReputationChecks, tx: object = KEYED(999n)) =>
+    checks.checkEntityCountInMempool(selfRelay(tx) as any, undefined, undefined, stake(sender));
+
+  it("admits an unstaked sender's 64th pending tx", async () => {
+    const { checks, reputationService } = build(keyedLanes(63));
+    await expect(add(checks)).resolves.toBeUndefined();
+    expect(reputationService.checkStake).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unstaked sender's 65th pending keyed tx", async () => {
+    const { checks, reputationService } = build(keyedLanes(64));
+    await expect(add(checks)).rejects.toThrow(/has 64 pending transactions; a sender that is not staked may have at most 64/);
+    expect(reputationService.checkStake).toHaveBeenCalledWith(stake(sender));
+  });
+
+  it("counts linear and keyed txs together", async () => {
+    const pending = [...keyedLanes(60), ...Array.from({ length: 4 }, () => selfRelay(LINEAR))];
+    const { checks } = build(pending);
+    await expect(add(checks)).rejects.toThrow(/a sender that is not staked may have at most 64/);
+  });
+
+  it("does not count other senders' txs", async () => {
+    const others = Array.from({ length: 100 }, (_, i) => ({
+      sender: `0x${(i + 1).toString(16).padStart(40, "0")}`, payer: undefined, factory: undefined, tx: KEYED(1n),
+    }));
+    const { checks } = build([...others, ...keyedLanes(10)]);
+    await expect(add(checks)).resolves.toBeUndefined();
+  });
+
+  it("lets a staked sender keep more than 64 pending", async () => {
+    const { checks, reputationService } = build(keyedLanes(200), true);
+    await expect(add(checks)).resolves.toBeUndefined();
+    expect(reputationService.checkStake).toHaveBeenCalledWith(stake(sender));
+  });
+
+  it("takes a sponsored sender's stake from its sender frame, not from the payer", async () => {
+    const pending = Array.from({ length: 64 }, (_, i) => ({ sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(BigInt(i + 1)) }));
+    const { checks, reputationService } = build(pending);
+    reputationService.checkStake.mockImplementation(async (info: { addr: string }) =>
+      info.addr === sender ? { code: 0, msg: "" } : { code: -32505, msg: `${info.addr} is unstaked` }
+    );
+    await expect(
+      checks.checkEntityCountInMempool(
+        { sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(999n) } as any,
+        stake(sender), undefined, stake(thirdPartyPayer)
+      )
+    ).resolves.toBeUndefined();
+    expect(reputationService.checkStake).toHaveBeenCalledWith(stake(sender));
+  });
+
+  it("does not cap a self-paying sender whitelisted in the config as a paymaster, but does as an account", async () => {
+    const asPaymaster = build(keyedLanes(64), false, { paymaster: [sender] });
+    await expect(add(asPaymaster.checks)).resolves.toBeUndefined();
+    expect(asPaymaster.reputationService.checkStake).not.toHaveBeenCalled();
+
+    const asAccount = build(keyedLanes(64), false, { account: [sender] });
+    await expect(add(asAccount.checks)).rejects.toThrow(/may have at most 64/);
+  });
+
+  it("does not cap a sponsored sender whitelisted in the config as an account, but does as a paymaster", async () => {
+    const pending = Array.from({ length: 64 }, (_, i) => ({ sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(BigInt(i + 1)) }));
+    const sponsored = (checks: MempoolReputationChecks) =>
+      checks.checkEntityCountInMempool(
+        { sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(999n) } as any,
+        stake(sender), undefined, stake(thirdPartyPayer)
+      );
+    await expect(sponsored(build(pending, false, { account: [sender] }).checks)).resolves.toBeUndefined();
+    await expect(sponsored(build(pending, false, { paymaster: [sender] }).checks)).rejects.toThrow(/may have at most 64/);
+  });
+
+  it("refuses through the real stake check, and passes a sender on the admin whitelist", async () => {
+    const reputation = new ReputationService(new LocalDbController("sender-cap"), 1337, 10, 10, 50, 1_000_000_000n, 0);
+    const checks = new MempoolReputationChecks(
+      { fetchPendingUserOps: vi.fn().mockResolvedValue(keyedLanes(64)) } as any,
+      reputation,
+      { whitelistedEntities: {} } as any
+    );
+    await expect(add(checks)).rejects.toThrow(/may have at most 64 \(0x4444444444444444444444444444444444444444 is unstaked\)/);
+    await reputation.addToWhitelist(sender);
+    await expect(add(checks)).resolves.toBeUndefined();
+  });
+
+  it("skips the ban check for a sender whitelisted in the config as an account", async () => {
+    const { checks, reputationService } = build([], false, { account: [sender] });
+    reputationService.getStatus.mockResolvedValue(2); // ReputationStatus.BANNED
+    await expect(
+      checks.checkEntityCountInMempool(
+        { sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(1n) } as any,
+        stake(sender), undefined, undefined
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it("treats a sender no role resolved a stake for as unstaked", async () => {
+    const pending = Array.from({ length: 64 }, (_, i) => ({ sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(BigInt(i + 1)) }));
+    const { checks, reputationService } = build(pending);
+    await expect(
+      checks.checkEntityCountInMempool(
+        { sender, payer: thirdPartyPayer, factory: undefined, tx: KEYED(999n) } as any,
+        undefined, undefined, stake(thirdPartyPayer)
+      )
+    ).rejects.toThrow(/a sender that is not staked may have at most 64/);
+    expect(reputationService.checkStake).toHaveBeenLastCalledWith(expect.objectContaining({ addr: sender, stake: 0 }));
   });
 });

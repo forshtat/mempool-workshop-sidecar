@@ -247,6 +247,12 @@ export class MempoolService {
       await this.checkBalanceObligations(entry, existingEntry);
       if (existingEntry) {
         await this.validateReplaceability(entry, existingEntry);
+        // A slot whose holder is no longer pending (Cancelled, Reverted, ...)
+        // gains a pending transaction, so it takes the same admission checks
+        // as an empty slot. Only a pending holder is a real replacement.
+        if (existingEntry.status >= MempoolEntryStatus.OnChain) {
+          await this.checkAdmission(entry, senderInfo, factoryInfo, payerInfo);
+        }
         await this.db.put(this.getKey(entry), {
           ...entry,
           lastUpdatedTime: now(),
@@ -276,20 +282,7 @@ export class MempoolService {
         }
         this.logger.debug("Mempool: Frame transaction replaced");
       } else {
-        // Any one of the three being present is enough to run the gate -
-        // see checkEntityCountInMempool's own comment for why `senderInfo`
-        // alone being undefined (the Self Relay shape) must not skip it
-        // entirely: that shape's sender is still gated, just through the
-        // `payerInfo`/"payer" bucket instead.
-        if (senderInfo || factoryInfo || payerInfo) {
-          await this.reputationCheck.checkEntityCountInMempool(
-            entry,
-            senderInfo,
-            factoryInfo,
-            payerInfo
-          );
-        }
-        await this.reputationCheck.checkMultipleRolesViolation(entry);
+        await this.checkAdmission(entry, senderInfo, factoryInfo, payerInfo);
         const frameTxKeys = await this.fetchKeys();
         const key = this.getKey(entry);
         frameTxKeys.push(key);
@@ -313,6 +306,31 @@ export class MempoolService {
       this.eventBus.emit(ExecutorEvent.pendingUserOps, entry);
     });
     return { replacedTxHash };
+  }
+
+  /**
+   * The reputation gates a newly pending transaction must pass. Any one of
+   * the three `StakeInfo`s being present is enough to run the count gate -
+   * see checkEntityCountInMempool's own comment for why `senderInfo` alone
+   * being undefined (the Self Relay shape) must not skip it entirely: that
+   * shape's sender is still gated, just through the `payerInfo`/"payer"
+   * bucket instead.
+   */
+  private async checkAdmission(
+    entry: MempoolEntry,
+    senderInfo?: StakeInfo,
+    factoryInfo?: StakeInfo,
+    payerInfo?: StakeInfo
+  ): Promise<void> {
+    if (senderInfo || factoryInfo || payerInfo) {
+      await this.reputationCheck.checkEntityCountInMempool(
+        entry,
+        senderInfo,
+        factoryInfo,
+        payerInfo
+      );
+    }
+    await this.reputationCheck.checkMultipleRolesViolation(entry);
   }
 
   async getPendingFrameTxsByPayer(payer: string): Promise<MempoolEntry[]> {
