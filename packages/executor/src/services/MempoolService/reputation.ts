@@ -222,6 +222,25 @@ export class MempoolReputationChecks {
   }
 
   /**
+   * ERC-8421 REPUTATION-040: an unchanged entity gets no new `seen`. If the
+   * replacement changes the payer or factory, the old address loses 1 and the
+   * new one gains 1. The sender can't change: it is part of the slot's identity.
+   */
+  async updateSeenOnReplacement(
+    replaced: MempoolEntry,
+    entry: MempoolEntry
+  ): Promise<void> {
+    for (const role of ["payer", "factory"] as const) {
+      const before = replaced[role];
+      const after = entry[role];
+      if (before === after) continue;
+      if (before && after && getAddress(before) === getAddress(after)) continue;
+      if (before) await this.reputationService.removeSeenStatus(before);
+      if (after) await this.reputationService.updateSeenStatus(after);
+    }
+  }
+
+  /**
    * Bumps `included` for every distinct entity address this entry names,
    * once each - unlike `updateSeenStatus`, unconditionally (no fresh stake
    * lookup gates the sender here; see this file's header comment for why

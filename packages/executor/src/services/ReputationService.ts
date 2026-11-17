@@ -66,6 +66,15 @@ export class ReputationService {
     });
   }
 
+  /** Undoes one `seen`, for a replacement that moved a role to another address. */
+  async removeSeenStatus(address: string): Promise<void> {
+    await this.mutex.runExclusive(async () => {
+      const entry = await this.fetchOne(address);
+      if (entry.opsSeen > 0) entry.addToReputation(-1, 0);
+      await this.save(entry);
+    });
+  }
+
   async updateIncludedStatus(address: string): Promise<void> {
     await this.mutex.runExclusive(async () => {
       const entry = await this.fetchOne(address);
