@@ -306,9 +306,16 @@ export class MempoolService {
         this.logger.debug("Mempool: Frame transaction added");
       }
       if (senderInfo || factoryInfo || payerInfo) {
-        // `senderInfo` alone may be undefined (Self Relay) - updateSeenStatus
-        // itself tolerates that; see its own comment.
-        await this.reputationCheck.updateSeenStatus(entry, senderInfo);
+        // ERC-8421 REPUTATION-040: admitting a replacement is not a new
+        // occurrence of `seen`. Only an entry still holding its slot counts as
+        // replaced: resubmitting after Cancelled or Reverted is a new admission.
+        if (existingEntry && existingEntry.status < MempoolEntryStatus.OnChain) {
+          await this.reputationCheck.updateSeenOnReplacement(existingEntry, entry);
+        } else {
+          // `senderInfo` alone may be undefined (Self Relay) - updateSeenStatus
+          // itself tolerates that; see its own comment.
+          await this.reputationCheck.updateSeenStatus(entry, senderInfo);
+        }
       }
       this.eventBus.emit(ExecutorEvent.pendingUserOps, entry);
     });
