@@ -85,6 +85,9 @@ export const RedirectedRPCMethods = {
   eth_getLogs: "eth_getLogs",
   eth_maxPriorityFeePerGas: "eth_maxPriorityFeePerGas",
   eth_sendRawTransaction: "eth_sendRawTransaction",
+  eth_blobBaseFee: "eth_blobBaseFee",
+  eth_getBlockReceipts: "eth_getBlockReceipts",
+  eth_feeHistory: "eth_feeHistory",
 };
 
 export enum HttpStatus {
